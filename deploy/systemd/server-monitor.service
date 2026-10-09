@@ -1,0 +1,16 @@
+# ~/.config/systemd/user/server-monitor.service   (then: systemctl --user enable --now server-monitor)
+[Unit]
+Description=Server monitor dashboard
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/server-monitor
+EnvironmentFile=%h/server-monitor/.env
+ExecStart=%h/server-monitor/venv/bin/python3 -m uvicorn app:app --host 127.0.0.1 --port 8100 --no-server-header --no-proxy-headers --workers 1
+Restart=always
+RestartSec=3
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,15 @@
+# ~/.config/systemd/user/dashboard-tunnel.service — Cloudflare tunnel in front of the dashboard
+[Unit]
+Description=Cloudflare Tunnel for the dashboard
+After=network-online.target server-monitor.service
+
+[Service]
+# Wi-Fi/DNS can come up late after boot: wait instead of crash-looping
+ExecStartPre=/bin/sh -c "until getent hosts region1.v2.argotunnel.com >/dev/null; do sleep 2; done"
+TimeoutStartSec=300
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --config %h/.cloudflared/dashboard.yml run dashboard
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

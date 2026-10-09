@@ -1,0 +1,198 @@
+#!/usr/bin/python3 -I
+"""sm-block — tiny root helper that drops traffic from attacker IPs (nftables table `inet sm_block`).
+
+No sudo is involved: the dashboard/agent user only drops small request files into
+/var/lib/sm-block/requests/, and a root systemd path unit runs `sm-block process`. Every request is
+re-checked here: LAN/private, Tailscale, loopback and any address with a live SSH session are refused,
+so automation can never lock you out. The table is separate from ufw and restored at boot.
+
+  sm-block add <ip> [reason]   block (IPv6: the whole /64)      (root, by hand)
+  sm-block del <ip|key>        unblock
+  sm-block list                JSON list
+  sm-block process             handle queued requests (sm-block-queue.service)
+  sm-block restore             re-apply saved list (boot)
+"""
+import ipaddress
+import json
+import os
+import subprocess
+import sys
+import time
+
+DIR = "/var/lib/sm-block"
+STATE = f"{DIR}/blocked.json"          # root only
+PUBLIC = f"{DIR}/public.json"          # readable status for the dashboard/agent
+QUEUE = f"{DIR}/requests"
+NFT = "/usr/sbin/nft"
+INTERNAL = [ipaddress.ip_network(n) for n in ("100.64.0.0/10", "fd7a:115c:a1e0::/48")]
+MAX_ENTRIES = 5000
+
+
+def load() -> dict:
+    try:
+        with open(STATE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save(d: dict):
+    os.makedirs(os.path.dirname(STATE), mode=0o700, exist_ok=True)
+    tmp = STATE + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(d, f)
+    os.replace(tmp, STATE)
+
+
+def apply(d: dict):
+    v4 = [k for k in d if ":" not in k]
+    v6 = [k for k in d if ":" in k]
+    elems = lambda xs: f" elements = {{ {', '.join(xs)} }};" if xs else ""
+    # one nft transaction: create-if-missing, drop, recreate — no window without the rules
+    ruleset = f"""table inet sm_block
+delete table inet sm_block
+table inet sm_block {{
+  set v4 {{ type ipv4_addr; flags interval;{elems(v4)} }}
+  set v6 {{ type ipv6_addr; flags interval;{elems(v6)} }}
+  chain input {{
+    type filter hook input priority -10; policy accept;
+    ip saddr @v4 drop
+    ip6 saddr @v6 drop
+  }}
+}}
+"""
+    r = subprocess.run([NFT, "-f", "-"], input=ruleset, text=True, capture_output=True)
+    if r.returncode:
+        sys.exit("nft 오류: " + r.stderr.strip())
+
+
+def write_public(d: dict, results: dict):
+    keep = dict(sorted(results.items(), key=lambda kv: -kv[1]["ts"])[:50])
+    tmp = PUBLIC + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"blocked": [{"key": k, **v} for k, v in sorted(d.items(), key=lambda kv: -kv[1]["ts"])],
+                   "results": keep}, f)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, PUBLIC)
+
+
+def old_results() -> dict:
+    try:
+        with open(PUBLIC) as f:
+            return json.load(f).get("results", {})
+    except (OSError, ValueError):
+        return {}
+
+
+def do_add(d: dict, ip: str, reason: str) -> str:
+    if len(d) >= MAX_ENTRIES:
+        raise ValueError("차단 목록이 가득 찼습니다")
+    k = key_for(ip)
+    d[k] = {"ts": int(time.time()), "reason": reason[:200]}
+    return k
+
+
+def do_del(d: dict, target: str) -> str:
+    k = target if target in d else None
+    if k is None:
+        try:
+            a = ipaddress.ip_address(target)
+            k = str(a) if a.version == 4 else str(ipaddress.ip_network(f"{a}/64", strict=False))
+        except ValueError:
+            raise ValueError("목록에 없습니다")
+    if k not in d:
+        raise ValueError("목록에 없습니다")
+    d.pop(k)
+    return k
+
+
+def ssh_peers() -> set:
+    r = subprocess.run(["ss", "-Htn", "state", "established", "( sport = :22 )"], capture_output=True, text=True)
+    peers = set()
+    for line in r.stdout.splitlines():
+        f = line.split()
+        if len(f) >= 4:
+            host = f[-1].rsplit(":", 1)[0].strip("[]")
+            peers.add(host.split("%")[0])
+    return peers
+
+
+def key_for(ip: str) -> str:
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        raise ValueError("IP 형식이 아닙니다")
+    if (a.is_private or a.is_loopback or a.is_link_local or a.is_multicast or a.is_unspecified
+            or a.is_reserved or any(a in n for n in INTERNAL)):
+        raise ValueError("내부망/로컬/Tailscale 주소는 차단하지 않습니다")
+    if str(a) in ssh_peers():
+        raise ValueError("지금 SSH로 접속 중인 주소라 차단하지 않습니다")
+    return str(a) if a.version == 4 else str(ipaddress.ip_network(f"{a}/64", strict=False))
+
+
+def process(d: dict):
+    """Handle queued request files (written by the unprivileged user). Each is validated, then deleted."""
+    results, changed = old_results(), False
+    names = sorted(n for n in os.listdir(QUEUE) if n.endswith(".json"))[:50]
+    for name in names:
+        path, rid = os.path.join(QUEUE, name), name[:-5]
+        try:
+            if os.path.getsize(path) > 2048:
+                raise ValueError("요청이 너무 큽니다")
+            with open(path) as f:
+                req = json.load(f)
+            if req.get("op") == "add":
+                msg = do_add(d, str(req.get("ip", "")), str(req.get("reason", "")))
+            elif req.get("op") == "del":
+                msg = do_del(d, str(req.get("key", "")))
+            else:
+                raise ValueError("알 수 없는 요청")
+            results[rid] = {"ok": True, "msg": msg, "ts": int(time.time())}
+            changed = True
+        except (ValueError, OSError) as e:
+            results[rid] = {"ok": False, "msg": str(e)[:200], "ts": int(time.time())}
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    if changed:
+        apply(d)
+        save(d)
+    write_public(d, results)
+
+
+def main(argv):
+    if os.geteuid() != 0:
+        sys.exit("root 권한이 필요합니다")
+    cmd = argv[1] if len(argv) > 1 else ""
+    d = load()
+    try:
+        if cmd == "add" and len(argv) >= 3:
+            k = do_add(d, argv[2], " ".join(argv[3:]))
+        elif cmd == "del" and len(argv) == 3:
+            k = do_del(d, argv[2])
+        elif cmd == "list":
+            print(json.dumps([{"key": k, **v} for k, v in sorted(d.items(), key=lambda kv: -kv[1]["ts"])]))
+            return
+        elif cmd == "process":
+            process(d)
+            return
+        elif cmd == "restore":
+            apply(d)
+            write_public(d, old_results())
+            print(f"restored {len(d)}")
+            return
+        else:
+            sys.exit(__doc__)
+    except ValueError as e:
+        sys.exit(str(e))
+    apply(d)
+    save(d)
+    write_public(d, old_results())
+    print(json.dumps({"ok": True, "key": k}))
+
+
+if __name__ == "__main__":
+    main(sys.argv)

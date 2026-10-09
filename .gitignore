@@ -1,0 +1,9 @@
+# secrets & runtime state — never commit
+.env
+data/
+node_agent/config.json
+# environments / caches
+venv/
+.venv/
+__pycache__/
+*.pyc

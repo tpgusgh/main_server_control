@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>서버 모니터</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="dot" id="liveDot"></span><span id="host">서버</span> <small>모니터</small></div>
+  <div class="meta" id="meta"></div>
+  <div class="spacer"></div>
+  <label class="server-sel"><span class="muted">보는 서버</span><select class="input" id="serverSel"></select></label>
+  <button class="btn" id="themeBtn" type="button" title="테마 전환">테마</button>
+  <button class="btn" id="logoutBtn" type="button">로그아웃</button>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab local-only" role="tab" data-tab="overview" aria-selected="true">개요</button>
+  <button class="tab" role="tab" data-tab="servers">서버 목록</button>
+  <button class="tab local-only" role="tab" data-tab="services">서비스</button>
+  <button class="tab local-only" role="tab" data-tab="network">네트워크 · 클라이언트</button>
+  <button class="tab" role="tab" data-tab="ai">AI 분석</button>
+  <button class="tab" role="tab" data-tab="access">접속 로그</button>
+  <button class="tab" role="tab" data-tab="security">보안 <span class="badge hidden" id="alertBadge"></span></button>
+</nav>
+
+<main>
+  <div class="view-banner hidden" id="viewBanner" role="status">
+    <span>지금 보는 서버: <b id="vbName"></b> <span class="muted mono" id="vbAddr"></span></span>
+    <span class="muted">모든 탭이 이 서버 기준으로 바뀌었습니다 · AI는 본체의 LLM을 씁니다</span>
+    <button class="btn" id="vbBack" type="button">본체로 돌아가기</button>
+  </div>
+  <!-- ============ 개요 ============ -->
+  <section data-panel="overview">
+    <div class="power-bar"><span class="muted">이 서버 전원</span>
+      <button class="btn" type="button" id="btnReboot">재부팅</button><button class="btn danger" type="button" id="btnPoweroff">서버 종료</button></div>
+    <div class="grid tiles" id="tiles"></div>
+
+    <div class="section-title">
+      <h2>부하 기록</h2><span class="sub">10초 간격 수집 · 최근 24시간 보관</span>
+      <div class="right"><div class="seg" id="range">
+        <button data-h="1">1시간</button><button data-h="6">6시간</button><button data-h="24" aria-pressed="true">24시간</button>
+      </div></div>
+    </div>
+    <div class="grid charts">
+      <div class="card chart-card"><div class="chart-head"><h3>CPU 사용률</h3><span class="peak" id="cpuPeak"></span><span class="now num" id="cpuNow"></span></div><div class="chart" id="chartCpu"></div></div>
+      <div class="card chart-card"><div class="chart-head"><h3>메모리 사용률</h3><span class="peak" id="memPeak"></span><span class="now num" id="memNow"></span></div><div class="chart" id="chartMem"></div></div>
+      <div class="card chart-card"><div class="chart-head"><h3>CPU 온도</h3><span class="peak" id="tempPeak"></span><span class="now num" id="tempNow"></span></div><div class="chart" id="chartTemp"></div></div>
+      <div class="card chart-card"><div class="chart-head"><h3>로드 평균 (1분)</h3><span class="peak" id="loadPeak"></span><span class="now num" id="loadNow"></span></div><div class="chart" id="chartLoad"></div></div>
+    </div>
+
+    <div class="grid two">
+      <div>
+        <div class="section-title"><h2>고부하 발생 시각</h2><span class="sub" id="thresholds"></span></div>
+        <div class="card">
+          <div class="peaks" id="peaks"></div>
+          <ul class="events" id="events"></ul>
+        </div>
+      </div>
+      <div>
+        <div class="section-title"><h2>상위 프로세스</h2><span class="sub">CPU 순</span></div>
+        <div class="card table-wrap"><table>
+          <thead><tr><th>프로세스</th><th>PID</th><th>사용자</th><th class="r">CPU</th><th class="r">메모리</th></tr></thead>
+          <tbody id="procs"></tbody>
+        </table></div>
+      </div>
+    </div>
+
+    <div class="grid two">
+      <div>
+        <div class="section-title"><h2>온도 센서</h2></div>
+        <div class="card table-wrap"><table>
+          <thead><tr><th>센서</th><th class="r">현재</th><th class="r">경고</th><th class="r">위험</th></tr></thead>
+          <tbody id="temps"></tbody>
+        </table></div>
+      </div>
+      <div>
+        <div class="section-title"><h2>디스크</h2></div>
+        <div class="card table-wrap"><table>
+          <thead><tr><th>마운트</th><th class="r">사용</th><th class="r">전체</th><th>사용률</th></tr></thead>
+          <tbody id="disks"></tbody>
+        </table></div>
+      </div>
+    </div>
+
+    <div class="section-title"><h2>홈 폴더 용량</h2><span class="sub" id="homeMeta"></span>
+      <div class="right"><button class="btn" id="homeRefresh">다시 계산</button></div></div>
+    <div class="card"><ul class="du-list" id="homeDu"></ul></div>
+  </section>
+
+  <!-- ============ 서버 목록 ============ -->
+  <section data-panel="servers" class="hidden">
+    <div id="serverListView">
+      <div class="section-title"><h2>서버 목록</h2><span class="sub">Tailscale 네트워크의 서버 · 10초마다 갱신</span>
+        <div class="right"><button class="btn primary" id="addServerBtn">서버 추가</button></div></div>
+      <div class="grid server-cards" id="serverCards"></div>
+
+      <div class="card add-server hidden" id="addServer">
+        <h3>서버 추가</h3>
+        <ol class="steps">
+          <li>새 서버에 Tailscale을 설치하고 같은 계정으로 로그인합니다.</li>
+          <li>이 서버에서 에이전트 파일을 복사합니다:<pre class="mono" id="scpCmd"></pre></li>
+          <li>새 서버에서 설치합니다 (sudo 불필요):<pre class="mono" id="installCmd"></pre></li>
+          <li>설치가 끝나면 출력되는 <b>주소</b>와 <b>토큰</b>을 아래에 입력합니다.</li>
+        </ol>
+        <form class="add-form" id="addServerForm">
+          <label>이름<input class="input" id="nsName" maxlength="40" required placeholder="예) 집 NAS"></label>
+          <label>주소<input class="input mono" id="nsAddr" maxlength="120" required placeholder="100.x.y.z:8101"></label>
+          <label>토큰<input class="input mono" id="nsToken" maxlength="200" required autocomplete="off"></label>
+          <div class="row"><button class="btn" type="button" id="addServerCancel">취소</button><button class="btn primary" type="submit">연결 확인 후 추가</button></div>
+        </form>
+      </div>
+    </div>
+
+    <div id="serverDetail" class="hidden">
+      <div class="section-title">
+        <button class="btn" id="nodeBack">← 목록</button>
+        <h2 id="ndName"></h2><span class="sub" id="ndMeta"></span>
+        <div class="right"><button class="btn" id="ndReboot">재부팅</button><button class="btn danger" id="ndPoweroff">서버 종료</button>
+          <button class="btn" id="ndRename">정보 수정</button><button class="btn danger" id="ndDelete">목록에서 삭제</button></div>
+      </div>
+      <div class="grid tiles" id="ndTiles"></div>
+      <div class="section-title"><h2>최근 24시간</h2></div>
+      <div class="grid charts">
+        <div class="card chart-card"><div class="chart-head"><h3>CPU 사용률</h3><span class="peak" id="ndCpuPeak"></span></div><div class="chart" id="ndChartCpu"></div></div>
+        <div class="card chart-card"><div class="chart-head"><h3>메모리 사용률</h3><span class="peak" id="ndMemPeak"></span></div><div class="chart" id="ndChartMem"></div></div>
+        <div class="card chart-card"><div class="chart-head"><h3>CPU 온도</h3><span class="peak" id="ndTempPeak"></span></div><div class="chart" id="ndChartTemp"></div></div>
+        <div class="card chart-card"><div class="chart-head"><h3>로드 평균 (1분)</h3><span class="peak" id="ndLoadPeak"></span></div><div class="chart" id="ndChartLoad"></div></div>
+      </div>
+      <p class="muted" id="ndScope"></p>
+      <div class="grid two">
+        <div>
+          <div class="section-title"><h2>상위 프로세스</h2><span class="sub">CPU 순</span></div>
+          <div class="card table-wrap"><table>
+            <thead><tr><th>프로세스</th><th>PID</th><th>사용자</th><th class="r">CPU</th><th class="r">메모리</th></tr></thead>
+            <tbody id="ndProcs"></tbody>
+          </table></div>
+        </div>
+        <div>
+          <div class="section-title"><h2>온도 센서</h2></div>
+          <div class="card table-wrap"><table>
+            <thead><tr><th>센서</th><th class="r">현재</th></tr></thead>
+            <tbody id="ndTemps"></tbody>
+          </table></div>
+          <div class="section-title"><h2>디스크</h2></div>
+          <div class="card table-wrap"><table>
+            <thead><tr><th>마운트</th><th class="r">사용</th><th class="r">전체</th><th>사용률</th></tr></thead>
+            <tbody id="ndDisks"></tbody>
+          </table></div>
+        </div>
+      </div>
+      <div class="section-title"><h2>홈 폴더 용량</h2><span class="sub" id="ndHomeMeta"></span></div>
+      <div class="card"><ul class="du-list" id="ndHomeDu"></ul></div>
+    </div>
+  </section>
+
+  <!-- ============ 서비스 ============ -->
+  <section data-panel="services" class="hidden">
+    <div class="section-title"><h2>서버 (systemd 사용자 서비스)</h2><span class="sub">~/.config/systemd/user 에 등록된 서비스</span>
+      <div class="right"><button class="btn" id="svcRefresh">새로고침</button></div></div>
+    <div class="card table-wrap"><table>
+      <thead><tr><th>서비스</th><th>상태</th><th>PID</th><th class="r">메모리</th><th>실행 시작</th><th class="r">재시작 횟수</th><th>부팅 시 자동 실행</th><th class="r">제어</th></tr></thead>
+      <tbody id="services"></tbody>
+    </table></div>
+    <p class="muted" id="lingerNote"></p>
+    <p class="muted">‘보호’ 표시된 서비스는 이 대시보드 접속에 필요해서 종료와 자동 실행 끄기는 막혀 있고 재시작만 가능합니다.</p>
+  </section>
+
+  <!-- ============ 네트워크 ============ -->
+  <section data-panel="network" class="hidden">
+    <div class="section-title"><h2>열린 포트 (실행 중인 서버)</h2>
+      <div class="right"><button class="btn" id="netRefresh">새로고침</button></div></div>
+    <div class="card table-wrap"><table>
+      <thead><tr><th>포트</th><th>주소</th><th>노출</th><th>프로세스</th><th>PID</th><th class="r">제어</th></tr></thead>
+      <tbody id="listening"></tbody>
+    </table></div>
+
+    <div class="grid two">
+      <div>
+        <div class="section-title"><h2>접속 중인 클라이언트</h2><span class="sub">외부 → 이 서버</span></div>
+        <div class="card table-wrap"><table>
+          <thead><tr><th>원격 주소</th><th>로컬 포트</th><th>프로세스</th></tr></thead>
+          <tbody id="inbound"></tbody>
+        </table></div>
+      </div>
+      <div>
+        <div class="section-title"><h2>로그인한 사용자</h2><span class="sub">SSH / 터미널</span></div>
+        <div class="card table-wrap"><table>
+          <thead><tr><th>사용자</th><th>터미널</th><th>접속지</th><th>시작</th></tr></thead>
+          <tbody id="users"></tbody>
+        </table></div>
+      </div>
+    </div>
+
+    <div class="section-title"><h2>외부로 나가는 연결</h2><span class="sub">이 서버 → 외부</span></div>
+    <div class="card table-wrap"><table>
+      <thead><tr><th>원격 주소</th><th>로컬 포트</th><th>프로세스</th></tr></thead>
+      <tbody id="outbound"></tbody>
+    </table></div>
+  </section>
+
+  <!-- ============ AI 분석 ============ -->
+  <section data-panel="ai" class="hidden">
+    <div class="card ai-status" id="aiStatus"></div>
+
+    <div class="section-title"><h2>일일 보고서</h2><span class="sub">매일 밤 12시(KST)부터 서버마다 15분 간격으로 AI가 전날 보고서 작성 · 30일 보관</span></div>
+    <div class="card">
+      <div class="risk-cal-head"><span class="muted">최근 30일 위험도</span>
+        <span class="legend"><i class="lv lv-low"></i>낮음 <i class="lv lv-medium"></i>주의 <i class="lv lv-high"></i>위험 <i class="lv lv-none"></i>보고서 없음</span></div>
+      <div class="risk-cal" id="riskCal" role="list"></div>
+      <div id="dailyView"></div>
+    </div>
+
+    <div class="section-title"><h2>보안 · 운영 브리핑</h2><span class="sub" id="briefMeta"></span>
+      <div class="right"><button class="btn primary" id="briefBtn">지금 분석</button></div></div>
+    <div class="card" id="briefing"></div>
+
+    <div class="section-title"><h2>AI에게 질문</h2><span class="sub">서버가 집계한 최근 24시간 데이터로 답합니다 · AI는 아무것도 실행하지 않습니다</span></div>
+    <div class="card chat">
+      <div class="chat-log" id="chatLog" aria-live="polite"></div>
+      <div class="chat-suggest" id="chatSuggest">
+        <button class="btn" data-q="오늘 보안상 주의할 점 있어?">오늘 보안상 주의할 점 있어?</button>
+        <button class="btn" data-q="최근 24시간 중 언제 부하가 제일 높았고 원인이 뭐야?">언제 부하가 제일 높았어?</button>
+        <button class="btn" data-q="로그인 실패한 IP들 위험해 보여?">로그인 실패 IP 위험해?</button>
+      </div>
+      <form class="chat-form" id="chatForm">
+        <textarea class="input" id="chatInput" rows="2" maxlength="500" placeholder="예) 203.0.113.7 접속 기록 요약해줘 · “기억해: …” 라고 하면 기억합니다"></textarea>
+        <button class="btn primary" id="chatSend" type="submit">보내기</button>
+      </form>
+    </div>
+
+    <div class="grid two">
+      <div>
+        <div class="section-title"><h2>AI의 기억</h2><span class="sub" id="memMeta"></span></div>
+        <div class="card">
+          <form class="mem-form" id="memForm">
+            <input class="input" id="memInput" maxlength="300" placeholder="예) todont 서버는 밤 11시 이후엔 안 써도 됨">
+            <button class="btn" type="submit">추가</button>
+          </form>
+          <ul class="mem-list" id="memList"></ul>
+        </div>
+      </div>
+      <div>
+        <div class="section-title"><h2>대화 기록</h2><span class="sub" id="chatsMeta"></span>
+          <div class="right"><input class="input" id="chatsQ" placeholder="검색" maxlength="50"></div></div>
+        <div class="card"><ul class="chat-history" id="chatHistory"></ul>
+          <div class="pager"><button class="btn" id="chatsPrev">이전</button><button class="btn" id="chatsNext">다음</button></div></div>
+      </div>
+    </div>
+
+    <div class="section-title"><h2>지난 브리핑</h2><span class="sub">30일 보관</span></div>
+    <div class="card table-wrap"><table>
+      <thead><tr><th>시각</th><th>계기</th><th>위험도</th><th>요약</th><th class="r">소요</th></tr></thead>
+      <tbody id="reports"></tbody>
+    </table></div>
+  </section>
+
+  <!-- ============ 접속 로그 ============ -->
+  <section data-panel="access" class="hidden">
+    <div id="accessRemote" class="hidden">
+      <div class="section-title"><h2>SSH 접속 IP 요약</h2><span class="sub">이 서버의 시스템 로그 기준 · 최근 7일</span></div>
+      <div class="card table-wrap"><table>
+        <thead><tr><th>IP</th><th class="r">성공</th><th class="r">실패</th><th>처음</th><th>마지막</th><th>사용자</th></tr></thead>
+        <tbody id="rIpSummary"></tbody>
+      </table></div>
+      <div class="section-title"><h2>SSH 접속 기록</h2></div>
+      <div class="card table-wrap"><table>
+        <thead><tr><th>시각</th><th>IP</th><th>결과</th><th>사용자</th><th>방식</th></tr></thead>
+        <tbody id="rAccess"></tbody>
+      </table></div>
+    </div>
+    <div id="accessLocal">
+    <div class="section-title"><h2>접속 IP 요약</h2><span class="sub" id="retention"></span></div>
+    <div class="card table-wrap"><table>
+      <thead><tr><th>IP</th><th>국가</th><th class="r">요청</th><th class="r">로그인 성공</th><th class="r">로그인 실패</th><th>처음 접속</th><th>마지막 접속</th><th></th></tr></thead>
+      <tbody id="ipSummary"></tbody>
+    </table></div>
+
+    <div class="section-title"><h2>접속 기록</h2>
+      <div class="right">
+        <input class="input mono" id="fIp" placeholder="IP 필터" maxlength="64">
+        <select class="input" id="fEvent">
+          <option value="">전체 이벤트</option>
+          <option value="login_ok">로그인 성공</option>
+          <option value="login_fail">로그인 실패</option>
+          <option value="banned">차단 IP 접근</option>
+          <option value="unban">차단 해제</option>
+          <option value="logout">로그아웃</option>
+          <option value="action">제어 작업</option>
+          <option value="page">페이지</option>
+          <option value="anon">비인증 요청</option>
+          <option value="denied">거부됨</option>
+        </select>
+      </div>
+    </div>
+    <div class="card table-wrap"><table>
+      <thead><tr><th>시각</th><th>IP</th><th>국가</th><th>이벤트</th><th>요청</th><th class="r">상태</th><th>내용</th><th>User-Agent</th></tr></thead>
+      <tbody id="access"></tbody>
+    </table>
+    <div class="pager"><span id="pageInfo"></span><button class="btn" id="prevPage">이전</button><button class="btn" id="nextPage">다음</button></div>
+    </div>
+    </div>
+  </section>
+
+  <!-- ============ 보안 ============ -->
+  <section data-panel="security" class="hidden">
+    <div id="secRemote" class="hidden">
+      <div class="section-title"><h2>서버 보안 상태</h2><span class="sub" id="rSecMeta"></span></div>
+      <div class="card"><ul class="sec-facts" id="rSecFacts"></ul></div>
+      <div class="section-title"><h2>서버 방화벽 차단</h2><span class="sub" id="rHbMeta"></span></div>
+      <div class="card table-wrap"><table>
+        <thead><tr><th>IP / 대역</th><th>차단 시각</th><th>사유</th><th class="r"></th></tr></thead>
+        <tbody id="rHostBlocks"></tbody>
+      </table></div>
+      <div class="section-title"><h2>AI 자동 조치</h2><span class="sub">이 서버에서 AI가 처리했거나 알린 것</span></div>
+      <div class="card table-wrap"><table>
+        <thead><tr><th>시각</th><th>서버</th><th>대상</th><th>조치</th><th>결과</th><th>이유</th></tr></thead>
+        <tbody id="rAiActions"></tbody>
+      </table></div>
+      <div class="section-title"><h2>이 서버 알림</h2></div>
+      <div class="card table-wrap"><table>
+        <thead><tr><th>시각</th><th>종류</th><th>내용</th></tr></thead>
+        <tbody id="rAlerts"></tbody>
+      </table></div>
+      <p class="muted">대시보드 로그인·IP 차단·세션 관리는 모든 서버 공통이라 본체 보기의 보안 탭에 있습니다.</p>
+    </div>
+    <div id="secLocal">
+    <div class="section-title"><h2>AI 자동 조치</h2><span class="sub">보안·운영에 빨간불이 켜지면 AI가 할 수 있는 건 처리하고, 못 하는 것만 알림으로 보냅니다</span></div>
+    <div class="card table-wrap"><table>
+      <thead><tr><th>시각</th><th>서버</th><th>대상</th><th>조치</th><th>결과</th><th>이유</th></tr></thead>
+      <tbody id="aiActions"></tbody>
+    </table></div>
+
+      <div class="section-title"><h2>서버 방화벽 차단</h2><span class="sub" id="lHbMeta"></span></div>
+      <div class="card table-wrap"><table>
+        <thead><tr><th>IP / 대역</th><th>차단 시각</th><th>사유</th><th class="r"></th></tr></thead>
+        <tbody id="lHostBlocks"></tbody>
+      </table></div>
+    <div class="section-title"><h2>영구 차단된 IP</h2><span class="sub" id="banRule"></span></div>
+    <div class="card table-wrap"><table>
+      <thead><tr><th>IP / 대역</th><th>국가</th><th>차단 시각</th><th class="r">실패</th><th>사유</th><th>User-Agent</th><th class="r"></th></tr></thead>
+      <tbody id="bans"></tbody>
+    </table></div>
+
+    <div class="section-title"><h2>보안 알림</h2><span class="sub" id="alertChannels"></span></div>
+    <div class="card table-wrap"><table>
+      <thead><tr><th>시각</th><th>종류</th><th>IP</th><th>국가</th><th>내용</th></tr></thead>
+      <tbody id="alerts"></tbody>
+    </table></div>
+
+    <div class="section-title"><h2>활성 세션</h2><span class="sub">30분 미사용 또는 12시간 경과 시 자동 만료</span>
+      <div class="right"><button class="btn danger" id="revokeOthers">다른 세션 모두 로그아웃</button></div></div>
+    <div class="card table-wrap"><table>
+      <thead><tr><th>IP</th><th>브라우저</th><th>로그인</th><th>마지막 활동</th><th class="r"></th></tr></thead>
+      <tbody id="sessions"></tbody>
+    </table></div>
+
+    <div class="section-title"><h2>보안 설정</h2></div>
+    <div class="card" id="secInfo"></div>
+    </div>
+  </section>
+</main>
+
+<dialog id="confirm">
+  <h3 id="confirmTitle"></h3>
+  <p id="confirmText"></p>
+  <div class="row"><button class="btn" id="confirmNo" type="button">취소</button><button class="btn primary" id="confirmYes" type="button">실행</button></div>
+</dialog>
+
+<dialog id="reportModal" class="wide" aria-label="AI 보고서"><div id="reportBody"></div></dialog>
+
+<dialog id="powerModal" aria-labelledby="powerTitle">
+  <form id="powerForm" class="add-form" method="dialog">
+    <h3 id="powerTitle"></h3>
+    <p id="powerWarn" class="power-warn"></p>
+    <div id="powerSetup" class="hidden"><p>이 서버는 아직 대시보드에서 전원을 다룰 권한이 없습니다. 그 서버에서 한 번만 실행하세요:</p><pre class="mono" id="powerCmd"></pre></div>
+    <div id="powerFields">
+      <label><span>확인을 위해 서버 이름 <b id="powerNameHint"></b> 을(를) 그대로 입력</span><input class="input" id="powerConfirm" maxlength="40" autocomplete="off" required></label>
+      <label>대시보드 비밀번호<input class="input" id="powerPw" type="password" maxlength="256" autocomplete="current-password" required></label>
+    </div>
+    <div class="row"><button class="btn" type="button" id="powerCancel">취소</button><button class="btn danger" type="submit" id="powerGo">실행</button></div>
+  </form>
+</dialog>
+
+<dialog id="editModal" aria-labelledby="editTitle">
+  <form id="editForm" class="add-form" method="dialog">
+    <h3 id="editTitle">서버 정보 수정</h3>
+    <label>이름<input class="input" id="edName" maxlength="40" required></label>
+    <label>메모<textarea class="input" id="edMemo" maxlength="300" rows="3" placeholder="예) 거실 NAS · 백업 전용 · 주 1회 재부팅"></textarea></label>
+    <div id="edRemote">
+      <label>주소 <span class="muted">(바꿀 때만)</span><input class="input mono" id="edAddr" maxlength="120"></label>
+      <label>토큰 <span class="muted">(바꿀 때만, 비우면 유지)</span><input class="input mono" id="edToken" maxlength="200" autocomplete="off"></label>
+    </div>
+    <div class="row"><button class="btn" type="button" id="edCancel">취소</button><button class="btn primary" type="submit" id="edSave">저장</button></div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

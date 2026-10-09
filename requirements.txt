@@ -1,0 +1,5 @@
+fastapi>=0.143
+uvicorn[standard]>=0.54
+psutil>=7.2
+PyJWT[crypto]>=2.15
+httpx>=0.28
