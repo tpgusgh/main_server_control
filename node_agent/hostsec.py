@@ -105,3 +105,25 @@ def block(ip: str, reason: str = ""):
 
 def unblock(key: str):
     return _request({"op": "del", "key": key})
+
+
+def delete_user_unit(unit: str, unit_dir, systemctl):
+    """Retire a STOPPED user unit: disable it and move its file into <unit_dir>/.deleted (restorable with mv).
+    `systemctl` is the caller's runner (dashboard and agent each have their own)."""
+    import shutil
+    import time
+    from pathlib import Path
+    state = systemctl("show", unit, "-p", "ActiveState", "--value").stdout.strip()
+    if state not in ("inactive", "failed"):
+        return False, "실행 중인 서비스는 삭제할 수 없습니다. 먼저 종료하세요."
+    src = Path(unit_dir) / unit
+    if not src.is_file():
+        return False, "서비스 파일이 없습니다."
+    systemctl("disable", unit)
+    trash = Path(unit_dir) / ".deleted"
+    trash.mkdir(mode=0o700, exist_ok=True)
+    dst = trash / f"{unit}.{time.strftime('%Y%m%d-%H%M%S')}"
+    shutil.move(str(src), str(dst))
+    systemctl("daemon-reload")
+    systemctl("reset-failed", unit)
+    return True, f"휴지통으로 옮김: {dst} (되살리기: mv 로 원래 자리에 두고 systemctl --user daemon-reload)"

@@ -153,7 +153,7 @@ class NodeHub:
         self.state.pop(nid, None)
 
     async def action(self, node: dict, unit: str, action: str) -> tuple[int, dict]:
-        if not UNIT_RE.match(unit) or action not in ("start", "stop", "restart", "enable", "disable"):
+        if not UNIT_RE.match(unit) or action not in ("start", "stop", "restart", "enable", "disable", "delete"):
             return 400, {"detail": "bad request"}
         return await self._post(node, f"/v1/services/{unit}/{action}")
 

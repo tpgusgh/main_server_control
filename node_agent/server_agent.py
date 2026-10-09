@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # hostsec.py ships next to this file
 import hostsec  # noqa: E402
 
-VERSION = "1.5"
+VERSION = "1.6"
 CONFIG_PATH = Path(os.environ.get("AGENT_CONFIG", Path(__file__).resolve().parent / "config.json"))
 UNIT_RE = re.compile(r"^[A-Za-z0-9@._-]+\.service$")
 SAMPLE_INTERVAL = 10
@@ -438,10 +438,15 @@ def sockets():
 
 
 def service_action(unit, action):
-    if action not in ("start", "stop", "restart", "enable", "disable"):
+    if action not in ("start", "stop", "restart", "enable", "disable", "delete"):
         return 400, {"detail": "unknown action"}
     if not UNIT_RE.match(unit) or unit not in managed_units():
         return 404, {"detail": "unknown unit"}
+    if action == "delete":
+        if unit in PROTECTED or SCOPE != "user":
+            return 409, {"detail": "이 서비스는 삭제할 수 없습니다."}
+        ok, msg = hostsec.delete_user_unit(unit, Path.home() / ".config" / "systemd" / "user", systemctl)
+        return (200, {"ok": True, "detail": msg}) if ok else (409, {"detail": msg})
     if action in ("stop", "disable") and unit in PROTECTED:
         return 409, {"detail": "에이전트 자신은 종료하거나 자동 실행을 끌 수 없습니다."}
     res = systemctl(action, unit) if action in ("enable", "disable") else systemctl("--no-block", action, unit)

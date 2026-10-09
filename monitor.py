@@ -292,10 +292,18 @@ def services(request: Request):
 @router.post("/api/services/{unit}/{action}")
 def service_action(request: Request, unit: str, action: str):
     require_auth(request)
-    if action not in ("start", "stop", "restart", "enable", "disable"):
+    if action not in ("start", "stop", "restart", "enable", "disable", "delete"):
         raise HTTPException(400, "unknown action")
     if not UNIT_RE.match(unit) or unit not in managed_units():
         raise HTTPException(404, "unknown unit")
+    if action == "delete":
+        if unit in PROTECTED_UNITS:
+            raise HTTPException(409, "이 서비스는 대시보드에 필요해서 삭제할 수 없습니다.")
+        request.state.event, request.state.detail = "action", f"delete {unit}"
+        ok, msg = hostsec.delete_user_unit(unit, USER_UNIT_DIR, _systemctl)
+        if not ok:
+            raise HTTPException(409, msg)
+        return {"ok": True, "detail": msg}
     if action == "stop" and unit in PROTECTED_UNITS:
         raise HTTPException(409, "이 서비스는 대시보드 접속에 필요해서 종료할 수 없습니다 (재시작만 가능).")
     if action == "disable" and unit in PROTECTED_UNITS:

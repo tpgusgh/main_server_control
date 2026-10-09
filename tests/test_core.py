@@ -204,3 +204,28 @@ class NightlySchedule(unittest.TestCase):
         self.assertEqual(due_at(0, 20), "nothing")  # node 7's slot is 00:30
         self.assertEqual(due_at(9, 0), 7)     # missed slot is caught up later
 
+
+
+class DeleteUnit(unittest.TestCase):
+    def test_only_stopped_units_are_moved_to_trash(self):
+        import tempfile
+        import types
+        from node_agent import hostsec
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "a.service").write_text("[Service]\n")
+            (Path(d) / "b.service").write_text("[Service]\n")
+            calls = []
+
+            def systemctl(*args):
+                calls.append(args)
+                state = "active" if args[:2] == ("show", "b.service") else "inactive"
+                return types.SimpleNamespace(stdout=state + "\n", returncode=0)
+
+            ok, _ = hostsec.delete_user_unit("b.service", d, systemctl)
+            self.assertFalse(ok, "a running unit must not be deleted")
+            self.assertTrue((Path(d) / "b.service").exists())
+            ok, msg = hostsec.delete_user_unit("a.service", d, systemctl)
+            self.assertTrue(ok, msg)
+            self.assertFalse((Path(d) / "a.service").exists())
+            self.assertEqual(len(list((Path(d) / ".deleted").iterdir())), 1, "moved, not destroyed")
+            self.assertIn(("disable", "a.service"), calls)

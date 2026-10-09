@@ -349,11 +349,12 @@ $("range").addEventListener("click", (e) => {
 // ---------------------------------------------------------------- services
 
 async function serviceAction(unit, action) {
-  const label = { start: "시작", stop: "종료", restart: "재시작", enable: "부팅 시 자동 실행 켜기", disable: "부팅 시 자동 실행 끄기" }[action];
-  const text = action === "enable" ? `${unit} 을(를) 부팅할 때 자동으로 실행할까요? (지금 상태는 바뀌지 않습니다)`
+  const label = { start: "시작", stop: "종료", restart: "재시작", enable: "부팅 시 자동 실행 켜기", disable: "부팅 시 자동 실행 끄기", delete: "삭제" }[action];
+  const text = action === "delete" ? `${unit} 을(를) 목록에서 삭제할까요? 서비스 파일은 ~/.config/systemd/user/.deleted/ 로 옮겨져서 되살릴 수 있습니다.`
+    : action === "enable" ? `${unit} 을(를) 부팅할 때 자동으로 실행할까요? (지금 상태는 바뀌지 않습니다)`
     : action === "disable" ? `${unit} 을(를) 부팅 시 자동 실행에서 뺄까요? (지금 실행 중이면 계속 실행됩니다)`
     : `정말 ${unit} 서비스를 ${label}할까요?`;
-  const ok = await confirmDialog(`${unit} ${label}`, text, action === "stop" || action === "disable");
+  const ok = await confirmDialog(`${unit} ${label}`, text, action === "stop" || action === "disable" || action === "delete");
   if (!ok) return;
   try {
     await post(`/api/services/${encodeURIComponent(unit)}/${action}`);
@@ -392,7 +393,8 @@ async function loadServices() {
       h("td", { class: "actions" },
         running ? null : h("button", { class: "btn", onclick: () => serviceAction(sv.unit, "start") }, "켜기"),
         h("button", { class: "btn", onclick: () => serviceAction(sv.unit, "restart") }, "다시 켜기"),
-        running && !sv.protected ? h("button", { class: "btn danger", onclick: () => serviceAction(sv.unit, "stop") }, "종료") : null));
+        running && !sv.protected ? h("button", { class: "btn danger", onclick: () => serviceAction(sv.unit, "stop") }, "종료") : null,
+        !running && !sv.protected ? h("button", { class: "btn danger", onclick: () => serviceAction(sv.unit, "delete") }, "삭제") : null));
   }), 8, "등록된 사용자 서비스가 없습니다");
 }
 $("svcRefresh").addEventListener("click", () => loadServices().catch((e) => toast(e.message, true)));
@@ -961,8 +963,9 @@ function renderNode(n) {
 
 
 async function nodeServiceAction(n, unit, action) {
-  const label = { start: "시작", stop: "종료", restart: "재시작", enable: "부팅 시 자동 실행 켜기", disable: "부팅 시 자동 실행 끄기" }[action];
-  if (!(await confirmDialog(`${n.name} · ${unit}`, `${n.name} 서버의 ${unit} 을(를) ${label}할까요?`, action === "stop" || action === "disable"))) return;
+  const label = { start: "시작", stop: "종료", restart: "재시작", enable: "부팅 시 자동 실행 켜기", disable: "부팅 시 자동 실행 끄기", delete: "삭제" }[action];
+  const why = action === "delete" ? " 서비스 파일은 그 서버의 ~/.config/systemd/user/.deleted/ 로 옮겨집니다." : "";
+  if (!(await confirmDialog(`${n.name} · ${unit}`, `${n.name} 서버의 ${unit} 을(를) ${label}할까요?${why}`, ["stop", "disable", "delete"].includes(action)))) return;
   try { await post(`/api/nodes/${n.id}/services/${encodeURIComponent(unit)}/${action}`); toast(`${label} 요청을 보냈습니다.`); setTimeout(() => loadServers().catch(() => {}), 1500); }
   catch (err) { toast(err.message, true); }
 }
@@ -1074,7 +1077,8 @@ function renderNodeServices(n) {
       h("td", { class: "actions" }, ctl ? [
         running ? null : h("button", { class: "btn", onclick: () => act("start") }, "켜기"),
         h("button", { class: "btn", onclick: () => act("restart") }, "다시 켜기"),
-        running && !sv.protected ? h("button", { class: "btn danger", onclick: () => act("stop") }, "종료") : null]
+        running && !sv.protected ? h("button", { class: "btn danger", onclick: () => act("stop") }, "종료") : null,
+        !running && !sv.protected && !agentBelow(d.version, 6) ? h("button", { class: "btn danger", onclick: () => act("delete") }, "삭제") : null]
         : h("span", { class: "muted", title: `그 서버에서: sudo systemctl restart ${sv.unit}` }, "보기 전용")));
   }), 8, n.online ? "등록된 서비스가 없습니다" : "서버에 연결할 수 없습니다");
 }
