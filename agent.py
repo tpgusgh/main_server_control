@@ -28,6 +28,9 @@ REPORT_RETENTION = 30 * 86400   # briefings and daily reports are kept for one m
 DAILY_HOUR = 0                   # daily report for the previous day is written right after midnight (KST)
 DAILY_STAGGER_MIN = 15           # this server at 00:00, then each other server 15 min later (keeps the CPU calm)
 RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
+# Units that fail harmlessly on stock Ubuntu (no wired network / firmware check); they'd alert every 6h.
+IGNORE_FAILED = set(filter(None, os.environ.get(
+    "SM_IGNORE_FAILED_UNITS", "systemd-networkd-wait-online.service,fwupd-refresh.service").split(",")))
 RECHECK_AFTER = 6 * 3600         # the same red item is acted on / reported at most every 6h
 SUSPICIOUS_REQS = 30             # unauthenticated or denied requests from one IP in 24h
 FIX_SCHEMA = {
@@ -270,7 +273,7 @@ class Analyst:
         if not d:
             return "high", ["서버에 연결할 수 없음"]
         reasons, level, now = [], "low", int(time.time())
-        failed = [x["unit"] for x in d.get("services", []) if x.get("active") == "failed"]
+        failed = [x["unit"] for x in d.get("services", []) if x.get("active") == "failed" and x["unit"] not in IGNORE_FAILED]
         fails = sum(1 for e in (d.get("host_facts") or {}).get("ssh") or []
                     if e["event"] != "login_ok" and e["ts"] >= now - 86400)
         cur = d.get("now") or {}
@@ -489,7 +492,7 @@ class Analyst:
         hot = self.db("SELECT COUNT(*) c FROM metrics WHERE ts>=? AND ts<? AND (cpu>=80 OR mem>=90 OR temp>=85)",
                       (start, end), one=True)["c"]
         down = self.db("SELECT COUNT(*) c FROM alerts WHERE kind='node_down' AND ts>=? AND ts<?", (start, end), one=True)["c"]
-        failed_units = [s["unit"] for s in self.services_fn() if s["active"] == "failed"]
+        failed_units = [s["unit"] for s in self.services_fn() if s["active"] == "failed" and s["unit"] not in IGNORE_FAILED]
         failed_units += [f"{n['이름']}:{f['unit']}" for n in self.nodes_fn() for f in (n.get("문제서비스") or [])]
         if untrusted_fails:
             level = "medium"; reasons.append(f"신뢰하지 않는 IP의 로그인 실패 {untrusted_fails}회")
@@ -663,7 +666,7 @@ class Analyst:
         """Rules decide what is red. Fixable items become candidates; the rest can only be reported."""
         now, cands, issues = int(time.time()), [], []
         for sv in self.services_fn():
-            if sv["active"] == "failed" and sv["unit"] != "llm.service":
+            if sv["active"] == "failed" and sv["unit"] != "llm.service" and sv["unit"] not in IGNORE_FAILED:
                 cands.append({"id": f"restart_local:{sv['unit']}", "type": "restart_local", "target": sv["unit"],
                               "server": self.local_name_fn(), "desc": f"이 서버의 {sv['unit']} 이(가) 실패 상태 → 재시작"})
         probs = self.fixers["node_problems"]() if "node_problems" in self.fixers else {"failed": [], "issues": []}

@@ -57,7 +57,7 @@ def _node_problems():
         if st.get("online") is False:
             down.append({"id": n["id"], "name": n["name"], "error": st.get("error")})
         for x in (st.get("data") or {}).get("services", []):
-            if x.get("active") != "failed":
+            if x.get("active") != "failed" or x["unit"] in agent.IGNORE_FAILED:
                 continue
             if x.get("controllable", True):
                 failed.append({"id": n["id"], "name": n["name"], "unit": x["unit"]})
