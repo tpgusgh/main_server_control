@@ -394,7 +394,8 @@ async function loadServices() {
         running ? null : h("button", { class: "btn", onclick: () => serviceAction(sv.unit, "start") }, "켜기"),
         h("button", { class: "btn", onclick: () => serviceAction(sv.unit, "restart") }, "다시 켜기"),
         running && !sv.protected ? h("button", { class: "btn danger", onclick: () => serviceAction(sv.unit, "stop") }, "종료") : null,
-        !running && !sv.protected ? h("button", { class: "btn danger", onclick: () => serviceAction(sv.unit, "delete") }, "삭제") : null));
+        !running && !sv.protected ? h("button", { class: "btn danger", onclick: () => serviceAction(sv.unit, "delete") }, "삭제") : null,
+        h("button", { class: "btn", onclick: () => openLogs(sv.unit, null) }, "로그")));
   }), 8, "등록된 사용자 서비스가 없습니다");
 }
 $("svcRefresh").addEventListener("click", () => loadServices().catch((e) => toast(e.message, true)));
@@ -517,9 +518,24 @@ async function loadAiActions() {
   }), 6, "아직 자동 조치 기록이 없습니다");
 }
 
+function fillHostStatus() {
+  return api("/api/hoststatus").then((s) => {
+    const li = $("hostStatusLi"); if (!li) return;
+    const remote = Object.values(s.backups.remote).map((r) => `${r.server} ${r.ok ? "✓" : "✗"} ${r.name}`).join(", ");
+    li.replaceChildren(h("b", {}, "업데이트"), " — ", updatesText(s.updates), h("br"), h("b", {}, "백업"), " — ",
+      `이 서버 ${s.backups.local.length}개 (최신 ${s.backups.local[0] || "없음"})`,
+      remote ? ` · 다른 서버로 복사: ${remote}` : " · 다른 서버로 복사: 에이전트 1.7 이상인 서버가 생기면 자동");
+  }).catch(() => {});
+}
+function updatesText(u) {
+  if (!u) return "확인 중…";
+  if (u.pending == null) return "apt 상태를 읽지 못했습니다";
+  return `대기 ${u.pending}개 (보안 ${u.security}개) · 자동 보안 업데이트 ${u.auto_security ? "켜짐" : "꺼짐"}${u.reboot_required ? " · ⚠ 재부팅 필요" : ""}`;
+}
 async function loadSecurity() {
   toggleRemote("sec", currentNode != null);
   if (currentNode != null) return renderNodeSecurity(await currentNodeData());
+
   api("/api/hostblock").then((r) => renderHostBlocks("l", r.installed ? r.blocked : null, null)).catch(() => {});
   loadAiActions().catch(() => {});
   const [{ sessions }, me, { bans }, alertRows] = await Promise.all([api("/api/sessions"), api("/api/me"), api("/api/bans"), loadAlertBadge()]);
@@ -555,8 +571,10 @@ async function loadSecurity() {
         t.source === "env" ? h("span", { class: "muted" }, " .env 에서 설정")
           : h("button", { class: "btn danger", onclick: () => untrustIp(t.ip) }, "해제"))) : h("li", { class: "muted" }, "없음"))),
     li("차단 해제(서버에서)", "venv/bin/python manage.py unban <IP>"),
+    h("li", { id: "hostStatusLi" }, h("b", {}, "업데이트·백업"), " — 확인 중…"),
     li("세션", "HttpOnly · Secure · SameSite=Strict 쿠키, 30분 미사용 시 만료"),
     li("비밀번호 변경", "서버의 ~/server-monitor/.env 에서 SM_PASSWORD 를 바꾸고 재시작 (변경 시 모든 세션 로그아웃)")));
+  fillHostStatus();  // after the list exists, so its row can be filled
 }
 async function trustIp(ip) {
   const label = prompt(`${ip} 을(를) 신뢰 IP로 영구 등록합니다.\n로그인을 몇 번 틀려도 차단되지 않습니다. (모바일 IP는 다른 사람과 공유될 수 있어요)\n\n이 IP의 이름:`, "내 기기");
@@ -867,6 +885,7 @@ function serverCard(n, isLocal) {
 }
 
 async function loadServers() {
+  if (currentNode == null) loadSites().catch(() => {});
   const d = await api("/api/nodes");
   if (d.local.ts_ip && d.local.ts_ip !== DASHBOARD_TS_IP) {
     DASHBOARD_TS_IP = d.local.ts_ip;
@@ -1079,7 +1098,8 @@ function renderNodeServices(n) {
         h("button", { class: "btn", onclick: () => act("restart") }, "다시 켜기"),
         running && !sv.protected ? h("button", { class: "btn danger", onclick: () => act("stop") }, "종료") : null,
         !running && !sv.protected && !agentBelow(d.version, 6) ? h("button", { class: "btn danger", onclick: () => act("delete") }, "삭제") : null]
-        : h("span", { class: "muted", title: `그 서버에서: sudo systemctl restart ${sv.unit}` }, "보기 전용")));
+        : h("span", { class: "muted", title: `그 서버에서: sudo systemctl restart ${sv.unit}` }, "보기 전용"),
+        agentBelow(d.version, 7) ? null : h("button", { class: "btn", onclick: () => openLogs(sv.unit, n) }, "로그")));
   }), 8, n.online ? "등록된 서비스가 없습니다" : "서버에 연결할 수 없습니다");
 }
 
@@ -1145,7 +1165,10 @@ async function renderNodeSecurity(n) {
     fact(exposed.every((p) => p.port === 22 || /^(100\.|fd7a:115c:a1e0:)/.test(p.ip)), "외부 노출 포트",
       exposed.length ? exposed.map((p) => `${p.port}${p.process ? `(${p.process})` : ""}`).join(", ") : "없음"),
     fact(!sec.reboot_required, "재부팅 필요", sec.reboot_required ? "예 — 업데이트 적용을 위해 재부팅 필요" : "아니오"),
-    h("li", {}, h("span", { class: "pill" }, "정보"), h("b", {}, "업데이트"), " — ", sec.updates || "정보 없음"),
+    d.updates ? fact(!d.updates.security && d.updates.auto_security, "업데이트", updatesText(d.updates))
+      : h("li", {}, h("span", { class: "pill" }, "정보"), h("b", {}, "업데이트"), " — ", agentBelow(d.version, 7) ? "에이전트 1.7 이상에서 표시" : "확인 중…"),
+    d.backups ? h("li", {}, h("span", { class: "pill" }, "정보"), h("b", {}, "보관 중인 대시보드 백업"), " — ",
+      d.backups.length ? `${d.backups.length}개 (최신 ${d.backups[d.backups.length - 1].name})` : "아직 없음 (매시 확인 후 복사)") : null,
   ] : h("li", { class: "muted" }, oldAgentNote(d) || "아직 수집 전입니다 (최대 1분)"));
   renderHostBlocks("r", agentBelow(d.version, 5) ? null : (hf.blocker === undefined ? null : hf.blocker), n);
   if (agentBelow(d.version, 5)) $("rHbMeta").textContent = `에이전트 ${d.version || "구버전"} — 1.5 로 다시 설치한 뒤 그 서버에서: sudo bash ~/node_agent/install-blocker.sh`;
@@ -1166,6 +1189,47 @@ function toggleRemote(prefix, remote) {
   $(`${prefix}Local`).classList.toggle("hidden", remote);
 }
 
+
+// ---------------------------------------------------------------- service logs
+
+let logTarget = null;
+async function openLogs(unit, node) {
+  logTarget = { unit, node };
+  $("logTitle").textContent = `${node ? node.name : "이 서버"} · ${unit} 최근 로그`;
+  $("logBody").textContent = "불러오는 중…";
+  if (!$("logModal").open) $("logModal").showModal();
+  try {
+    const r = await api(node ? `/api/nodes/${node.id}/services/${encodeURIComponent(unit)}/logs?lines=300`
+                             : `/api/services/${encodeURIComponent(unit)}/logs?lines=300`);
+    $("logBody").textContent = r.log;
+    $("logBody").scrollTop = $("logBody").scrollHeight;  // newest at the bottom
+  } catch (err) { $("logBody").textContent = err.message; }
+}
+$("logRefresh").addEventListener("click", () => logTarget && openLogs(logTarget.unit, logTarget.node));
+$("logClose").addEventListener("click", () => $("logModal").close());
+
+// ---------------------------------------------------------------- website checks
+
+async function loadSites() {
+  const { sites } = await api("/api/sites");
+  fill($("siteRows"), sites.map((x) => h("tr", {},
+    h("td", {}, h("b", {}, x.name)), h("td", { class: "mono ellipsis", title: x.url }, x.url),
+    h("td", {}, x.ok == null ? h("span", { class: "pill" }, "확인 중")
+      : h("span", { class: `pill ${x.ok ? "good" : "crit"}` }, x.ok ? `정상 ${x.code}` : (x.code ? `오류 ${x.code}` : "응답 없음"))),
+    h("td", { class: "r num" }, x.ms != null ? `${x.ms}ms` : "–"),
+    h("td", { class: "muted" }, x.ts ? fmtAgo(x.ts) : "–"), h("td", { class: "muted" }, x.since ? fmtDur(Date.now() / 1000 - x.since) : "–"),
+    h("td", { class: "actions" }, h("button", { class: "btn danger", onclick: async () => {
+      if (!(await confirmDialog("감시 해제", `${x.name} (${x.url}) 감시를 그만할까요?`, true))) return;
+      await post("/api/sites/delete", { url: x.url }); loadSites();
+    } }, "삭제")))), 7, "등록된 웹사이트가 없습니다");
+}
+$("siteForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await post("/api/sites", { name: $("siteName").value.trim(), url: $("siteUrl").value.trim() });
+    $("siteForm").reset(); toast("추가했습니다."); loadSites();
+  } catch (err) { toast(err.message, true); }
+});
 
 // ---------------------------------------------------------------- machine power
 

@@ -108,8 +108,8 @@ def safe_path(p: str) -> str:
 class Analyst:
     def __init__(self, db, services_fn, units_fn, status_fn, events_fn, ip_labels, is_trusted, config_fn,
                  nodes_fn=lambda start=None, end=None: [], local_name_fn=lambda: "", fixers=None,
-                 node_fn=lambda nid: (None, None), node_ids_fn=lambda: []):
-        self.node_ids_fn = node_ids_fn
+                 node_fn=lambda nid: (None, None), node_ids_fn=lambda: [], sites_fn=lambda: []):
+        self.node_ids_fn, self.sites_fn = node_ids_fn, sites_fn
         self.nodes_fn, self.local_name_fn, self.fixers, self.node_fn = nodes_fn, local_name_fn, fixers or {}, node_fn
         self._handled: dict[str, int] = {}
         self.db, self.services_fn, self.units_fn = db, services_fn, units_fn
@@ -212,6 +212,7 @@ class Analyst:
             "관리자작업_24시간": [{"시각": kst(a["ts"]), "작업": safe_path(a["detail"].replace(" ", "_"))} for a in actions],
             "활성세션수": sessions,
             "다른서버(Tailscale)": self.nodes_fn(),
+            "웹사이트감시": self.sites_fn(),
             "보안설정": {"cloudflare_access": cfg["cf_access"], "2단계인증": cfg["totp"],
                      "신뢰IP수": cfg["trusted_count"], "차단기준": "비밀번호 3회 실패 시 영구차단(신뢰IP 제외)"},
         }
@@ -494,6 +495,9 @@ class Analyst:
         down = self.db("SELECT COUNT(*) c FROM alerts WHERE kind='node_down' AND ts>=? AND ts<?", (start, end), one=True)["c"]
         failed_units = [s["unit"] for s in self.services_fn() if s["active"] == "failed" and s["unit"] not in IGNORE_FAILED]
         failed_units += [f"{n['이름']}:{f['unit']}" for n in self.nodes_fn() for f in (n.get("문제서비스") or [])]
+        down_sites = [s["이름"] for s in self.sites_fn() if s["정상"] is False]
+        if down_sites:
+            level = "medium"; reasons.append("접속 불가 웹사이트: " + ", ".join(down_sites))
         if untrusted_fails:
             level = "medium"; reasons.append(f"신뢰하지 않는 IP의 로그인 실패 {untrusted_fails}회")
         if bans:

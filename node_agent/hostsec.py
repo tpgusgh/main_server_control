@@ -127,3 +127,37 @@ def delete_user_unit(unit: str, unit_dir, systemctl):
     systemctl("daemon-reload")
     systemctl("reset-failed", unit)
     return True, f"휴지통으로 옮김: {dst} (되살리기: mv 로 원래 자리에 두고 systemctl --user daemon-reload)"
+
+
+def update_status():
+    """Live apt state (no root needed). The update-notifier text file goes stale, so it isn't used."""
+    import os
+    import time
+    from pathlib import Path
+    try:
+        r = subprocess.run(["apt", "list", "--upgradable"], capture_output=True, text=True, timeout=90,
+                           env={**os.environ, "LANG": "C"})
+        lines = [l for l in r.stdout.splitlines() if "[upgradable" in l]
+    except (OSError, subprocess.SubprocessError):
+        lines = None
+    try:
+        auto = 'Unattended-Upgrade "1"' in Path("/etc/apt/apt.conf.d/20auto-upgrades").read_text()
+    except OSError:
+        auto = False
+    return {"ts": int(time.time()), "pending": None if lines is None else len(lines),
+            "security": None if lines is None else sum(1 for l in lines if "-security" in l.split()[0]),
+            "auto_security": auto, "reboot_required": Path("/var/run/reboot-required").exists()}
+
+
+def service_logs(unit: str, lines: int = 200, user: bool = True) -> str:
+    """Recent journal lines of one unit (user journal, or the system journal — readable via group adm)."""
+    if not re.fullmatch(r"[A-Za-z0-9@._-]+\.service", unit):
+        return "잘못된 서비스 이름"
+    cmd = ["journalctl", *(["--user"] if user else []), "-u", unit, "-n", str(max(10, min(lines, 1000))),
+           "--no-pager", "-o", "short-iso"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"로그를 읽지 못했습니다 ({type(e).__name__})"
+    out = (r.stdout or r.stderr or "").strip() or "기록된 로그가 없습니다."
+    return out[-200_000:]

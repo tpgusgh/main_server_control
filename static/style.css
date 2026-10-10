@@ -390,3 +390,6 @@ td.nowrap { white-space: nowrap; }
 .power-warn { color: var(--critical-ink); font-weight: 600; }
 #powerModal .add-form { max-width: none; }
 #powerModal pre { background: var(--surface-2); padding: 8px 10px; border-radius: 6px; white-space: pre-wrap; }
+.log-view { max-height: 65vh; overflow: auto; white-space: pre-wrap; word-break: break-all; background: var(--surface-2);
+  padding: 10px 12px; border-radius: 8px; font-size: 12px; line-height: 1.45; margin: 8px 0 0; }
+#siteForm .input:first-child { flex: 0 0 160px; }

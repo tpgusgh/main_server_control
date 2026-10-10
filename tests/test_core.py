@@ -229,3 +229,28 @@ class DeleteUnit(unittest.TestCase):
             self.assertFalse((Path(d) / "a.service").exists())
             self.assertEqual(len(list((Path(d) / ".deleted").iterdir())), 1, "moved, not destroyed")
             self.assertIn(("disable", "a.service"), calls)
+
+
+class SiteChecks(unittest.TestCase):
+    def test_up_down_and_alert_once(self):
+        import asyncio
+        import threading
+        import types
+        if "sites" not in sys.modules:  # stub core: importing the real one would open data/monitor.db
+            sys.modules.setdefault("core", types.SimpleNamespace(_cfg_lock=threading.Lock(), raise_alert=None,
+                                                                 require_auth=None))
+        import sites
+        sent = []
+        sites.raise_alert = lambda kind, ip, country, msg, *a: sent.append(kind)
+        codes = iter([200, 502, 502, 502, 301])
+
+        async def fake_get(url):
+            return types.SimpleNamespace(status_code=next(codes))
+        sites._client = types.SimpleNamespace(get=fake_get)
+        site = {"name": "t", "url": "https://t.example/"}
+        sites.state.clear()
+        for _ in range(5):
+            asyncio.run(sites.check(site))
+        self.assertEqual(sent, ["site_down", "site_up"], "alert after 2 failures, once; recovery on redirect (Access)")
+        self.assertTrue(sites.state[site["url"]]["ok"])
+

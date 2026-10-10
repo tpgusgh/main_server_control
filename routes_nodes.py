@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 import nodes
 import security
 from core import _cfg_lock, confirm_password, country_of, db, local_name, raise_alert, require_auth
+import monitor
 from monitor import POWER_LABEL, KeyBody, PowerBody, sampler
 
 
@@ -165,3 +166,48 @@ async def nodes_hostblock_remove(request: Request, nid: int, body: KeyBody):
     if code != 200:
         raise HTTPException(code if 400 <= code < 600 else 502, data.get("detail", "실패"))
     return data
+
+
+@router.get("/api/nodes/{nid}/services/{unit}/logs")
+async def nodes_service_logs(request: Request, nid: int, unit: str, lines: int = 200):
+    require_auth(request)
+    node = _node_or_404(nid)
+    if not nodes.UNIT_RE.match(unit):
+        raise HTTPException(400, "bad unit")
+    try:
+        r = await hub.client.get(f"{node['address']}/v1/logs/{unit}?lines={max(10, min(lines, 1000))}",
+                                 headers={"Authorization": f"Bearer {node['token']}"})
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        raise HTTPException(502, f"로그를 가져오지 못했습니다 ({type(e).__name__}) — 에이전트 1.7 이상 필요")
+
+
+async def push_backups():
+    """Off-site copy: give every online node (agent 1.7+) the newest DB + config backup it doesn't have yet."""
+    if not monitor.BACKUP_DIR.is_dir():
+        return
+    dbs = sorted(monitor.BACKUP_DIR.glob("monitor-*.db"))
+    if not dbs:
+        return
+    day = dbs[-1].stem.split("-")[1]
+    files = [(dbs[-1], f"main-{day}.db"), (monitor.BACKUP_DIR / f"config-{day}.json", f"main-{day}.json")]
+    for n in hub.nodes():
+        data = (hub.state.get(n["id"]) or {}).get("data") or {}
+        if not hub.state.get(n["id"], {}).get("online") or "backups" not in data:
+            continue  # offline, or an agent too old to store backups
+        have = {b["name"] for b in data["backups"]}
+        for path, name in files:
+            if name in have or not path.exists():
+                continue
+            try:
+                r = await hub.client.post(f"{n['address']}/v1/backup/{name}", content=path.read_bytes(),
+                                          headers={"Authorization": f"Bearer {n['token']}"}, timeout=120)
+                ok, err = r.status_code == 200, None if r.status_code == 200 else f"HTTP {r.status_code}"
+            except Exception as e:
+                ok, err = False, type(e).__name__
+            monitor.REMOTE_BACKUPS[n["id"]] = {"ts": int(time.time()), "ok": ok, "name": name, "error": err,
+                                               "server": n["name"]}
+
+
+monitor.AFTER_BACKUP.append(push_backups)

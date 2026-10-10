@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 import agent
 from node_agent import hostsec
 import nodes
+import sites
 from core import BANNED, IP_LABELS, _security_config, ban, ban_key, db, is_trusted, labeled, local_name, raise_alert, require_auth
 from monitor import _systemctl, load_events_data, managed_units, services_data, status_data
 from routes_nodes import hub
@@ -122,7 +123,8 @@ analyst = agent.Analyst(db=db, services_fn=lambda: services_data()["services"], 
                                 "ban_ip": _fix_ban, "node_problems": _node_problems, "alert": raise_alert,
                                 "ssh_attackers": _ssh_attackers, "block_host": _fix_block_host},
                         node_fn=lambda nid: (hub.get(nid), (hub.state.get(nid) or {}).get("data")),
-                        node_ids_fn=lambda: [n["id"] for n in hub.nodes()])
+                        node_ids_fn=lambda: [n["id"] for n in hub.nodes()],
+                        sites_fn=sites.summary)
 
 
 def _check_node(node: int | None):

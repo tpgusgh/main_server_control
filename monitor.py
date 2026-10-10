@@ -95,6 +95,7 @@ def prune():
 
 
 BACKUP_DIR = BASE / "data" / "backups"
+AFTER_BACKUP: list = []  # async callables run hourly after backup_db (routes_nodes registers the off-site copy)
 BACKUP_KEEP = 7
 HEARTBEAT_URL = os.environ.get("SM_HEARTBEAT_URL", "").strip()
 
@@ -141,6 +142,11 @@ async def sampler_loop():
                 await asyncio.to_thread(prune)
                 await asyncio.to_thread(backup_db)
                 last_prune = time.time()
+                for hook in AFTER_BACKUP:  # e.g. copy the newest backup to other servers
+                    try:
+                        await hook()
+                    except Exception as e:
+                        print("backup hook error:", type(e).__name__, e, flush=True)
             if HEARTBEAT_URL and time.time() - last_beat > 300:
                 last_beat = time.time()
                 await asyncio.to_thread(heartbeat)
@@ -524,3 +530,35 @@ def hostblock_remove(request: Request, body: KeyBody):
     if not ok:
         raise HTTPException(409, msg)
     return {"ok": True, "detail": msg}
+
+
+# ---------------------------------------------------------------- service logs, apt status
+
+
+@router.get("/api/services/{unit}/logs")
+def service_logs(request: Request, unit: str, lines: int = 200):
+    require_auth(request)
+    if not UNIT_RE.match(unit) or unit not in managed_units():
+        raise HTTPException(404, "unknown unit")
+    return {"unit": unit, "log": hostsec.service_logs(unit, lines, user=True)}
+
+
+_updates: dict = {"data": None, "t": 0.0}
+
+
+def updates_cached():
+    """apt state, refreshed in the background at most hourly (apt list takes a moment)."""
+    if time.time() - _updates["t"] > 3600:
+        _updates["t"] = time.time()
+        threading.Thread(target=lambda: _updates.update(data=hostsec.update_status()), daemon=True).start()
+    return _updates["data"]
+
+
+REMOTE_BACKUPS: dict = {}  # node id -> {"ts", "ok", "name", "error"}, filled by routes_nodes
+
+
+@router.get("/api/hoststatus")
+def hoststatus(request: Request):
+    require_auth(request)
+    local = sorted((p.name for p in BACKUP_DIR.glob("monitor-*.db")), reverse=True) if BACKUP_DIR.is_dir() else []
+    return {"updates": updates_cached(), "backups": {"local": local, "remote": REMOTE_BACKUPS}}

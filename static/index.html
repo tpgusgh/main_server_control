@@ -99,6 +99,19 @@
         <div class="right"><button class="btn primary" id="addServerBtn">서버 추가</button></div></div>
       <div class="grid server-cards" id="serverCards"></div>
 
+      <div class="section-title"><h2>웹사이트 감시</h2><span class="sub">2분마다 접속 확인 · 2번 연속 실패하면 알림 (3xx·4xx는 정상으로 봄)</span></div>
+      <div class="card">
+        <form class="mem-form" id="siteForm">
+          <input class="input" id="siteName" maxlength="40" placeholder="이름 (예: todont)" required>
+          <input class="input mono" id="siteUrl" maxlength="300" placeholder="https://todont.example.com/" required>
+          <button class="btn" type="submit">추가</button>
+        </form>
+        <div class="table-wrap"><table>
+          <thead><tr><th>이름</th><th>주소</th><th>상태</th><th class="r">응답</th><th>마지막 확인</th><th>상태 지속</th><th></th></tr></thead>
+          <tbody id="siteRows"></tbody>
+        </table></div>
+      </div>
+
       <div class="card add-server hidden" id="addServer">
         <h3>서버 추가</h3>
         <ol class="steps">
@@ -372,6 +385,12 @@
 </dialog>
 
 <dialog id="reportModal" class="wide" aria-label="AI 보고서"><div id="reportBody"></div></dialog>
+
+<dialog id="logModal" class="wide" aria-labelledby="logTitle">
+  <div class="modal-head"><h3 id="logTitle"></h3>
+    <span><button class="btn" type="button" id="logRefresh">새로고침</button> <button class="btn" type="button" id="logClose">닫기</button></span></div>
+  <pre class="log-view mono" id="logBody"></pre>
+</dialog>
 
 <dialog id="powerModal" aria-labelledby="powerTitle">
   <form id="powerForm" class="add-form" method="dialog">

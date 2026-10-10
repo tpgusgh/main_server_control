@@ -22,7 +22,8 @@ from routes_ai import analyst
 @asynccontextmanager
 async def lifespan(_app):
     await asyncio.to_thread(sampler.sample)
-    tasks = [asyncio.create_task(sampler_loop()), asyncio.create_task(analyst.loop()), asyncio.create_task(hub.loop())]
+    tasks = [asyncio.create_task(sampler_loop()), asyncio.create_task(analyst.loop()), asyncio.create_task(hub.loop()),
+             asyncio.create_task(sites.loop())]
     yield
     for t in tasks:
         t.cancel()
@@ -78,7 +79,7 @@ SECURITY_HEADERS = {
     "X-Robots-Tag": "noindex, nofollow",
 }
 
-QUIET_PREFIXES = ("/api/status", "/api/metrics", "/api/services", "/api/network",
+QUIET_PREFIXES = ("/api/status", "/api/metrics", "/api/services", "/api/network", "/api/sites", "/api/hoststatus",
                   "/api/access", "/api/sessions", "/api/me", "/api/bans", "/api/alerts", "/api/ai/status", "/api/ai/memory", "/api/ai/chats", "/api/ai/report", "/api/ai/actions",
                   "/api/nodes", "/api/disk", "/static/")
 
@@ -169,8 +170,10 @@ import monitor  # noqa: E402  (routers last: they import from modules above)
 import routes_ai  # noqa: E402
 import routes_auth  # noqa: E402
 import routes_nodes  # noqa: E402
+import sites  # noqa: E402
 
 app.include_router(monitor.router)
 app.include_router(routes_auth.router)
 app.include_router(routes_nodes.router)
 app.include_router(routes_ai.router)
+app.include_router(sites.router)

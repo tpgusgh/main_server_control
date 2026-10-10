@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # hostsec.py ships next to this file
 import hostsec  # noqa: E402
 
-VERSION = "1.6"
+VERSION = "1.7"
 CONFIG_PATH = Path(os.environ.get("AGENT_CONFIG", Path(__file__).resolve().parent / "config.json"))
 UNIT_RE = re.compile(r"^[A-Za-z0-9@._-]+\.service$")
 SAMPLE_INTERVAL = 10
@@ -206,8 +206,7 @@ def security_facts():
             "ssh_root_login": sshd_value("PermitRootLogin", "prohibit-password"),
             "authorized_keys": sum(1 for l in read(keys).splitlines() if l.strip() and not l.startswith("#")),
             "firewall": "on" if re.search(r"^ENABLED=yes", read("/etc/ufw/ufw.conf"), re.M) else "off",
-            "reboot_required": Path("/var/run/reboot-required").exists(),
-            "updates": " ".join(read("/var/lib/update-notifier/updates-available").split())[:300] or None}
+            "reboot_required": Path("/var/run/reboot-required").exists()}
 
 
 def power_state():
@@ -262,7 +261,8 @@ class Sampler(threading.Thread):
         self._procs = (proc_snapshot(), time.time())
         self.host = {}
         self.du = None
-        self._du_t = 0.0
+        self._du_t = self._upd_t = 0.0
+        self.updates = None
         self._host_t = 0.0
 
     def sample(self):
@@ -302,6 +302,9 @@ class Sampler(threading.Thread):
 
     def run(self):
         while True:
+            if time.time() - self._upd_t > 3600:  # apt list: hourly is plenty
+                self._upd_t = time.time()
+                threading.Thread(target=lambda: setattr(self, "updates", hostsec.update_status()), daemon=True).start()
             if time.time() - self._du_t > 3600:
                 self._du_t = time.time()
                 threading.Thread(target=lambda: setattr(self, "du", home_du()), daemon=True).start()
@@ -455,6 +458,20 @@ def service_action(unit, action):
     return 200, {"ok": True}
 
 
+# ---------------------------------------------------------------- dashboard backups kept on this machine
+
+BACKUP_DIR = Path(__file__).resolve().parent / "backups"
+BACKUP_KEEP = 7
+BACKUP_MAX = 500 * 1024 * 1024
+
+
+def list_backups():
+    if not BACKUP_DIR.is_dir():
+        return []
+    return [{"name": p.name, "size": p.stat().st_size, "ts": int(p.stat().st_mtime)}
+            for p in sorted(BACKUP_DIR.iterdir()) if p.suffix in (".db", ".json")]
+
+
 # ---------------------------------------------------------------- http
 
 _bad: dict[str, list[float]] = {}
@@ -504,12 +521,42 @@ class Handler(BaseHTTPRequestHandler):
                                     "os": os_name(),
                                     "kernel": os.uname().release, "uptime": up, "boot_time": time.time() - up,
                                     "cpu_count": os.cpu_count(), "now": sampler.latest, "services": services(),
-                                    "scope": SCOPE, "host_facts": sampler.host, "home_du": sampler.du})
+                                    "scope": SCOPE, "host_facts": sampler.host, "home_du": sampler.du,
+                                    "updates": sampler.updates, "backups": list_backups()})
+        m = re.fullmatch(r"/v1/logs/([A-Za-z0-9@._-]+\.service)(?:\?lines=(\d+))?", self.path)
+        if m:  # this user's units come from the user journal, everything else from the system journal
+            unit = m.group(1)
+            text = hostsec.service_logs(unit, int(m.group(2) or 200), user=unit in managed_units())
+            return self.reply(200, {"unit": unit, "log": text})
         self.reply(404, {"detail": "not found"})
 
     def do_POST(self):
         if not self.authorized():
             return self.reply(403, {"detail": "forbidden"})
+        b = re.fullmatch(r"/v1/backup/([a-z0-9-]+-\d{8}\.(?:db|json))", self.path)
+        if b:  # dashboard backup copy (off-machine), sent over Tailscale
+            n = int(self.headers.get("Content-Length") or 0)
+            if not 0 < n <= BACKUP_MAX:
+                return self.reply(413, {"detail": "too large"})
+            BACKUP_DIR.mkdir(mode=0o700, exist_ok=True)
+            tmp = BACKUP_DIR / (b.group(1) + ".part")
+            with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as f:
+                left = n
+                while left:
+                    chunk = self.rfile.read(min(left, 1 << 20))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    left -= len(chunk)
+            if left:
+                tmp.unlink(missing_ok=True)
+                return self.reply(400, {"detail": "incomplete upload"})
+            os.replace(tmp, BACKUP_DIR / b.group(1))
+            prefix, ext = b.group(1).rsplit("-", 1)[0], b.group(1).rsplit(".", 1)[1]
+            for old in sorted(BACKUP_DIR.glob(f"{prefix}-*.{ext}"))[:-BACKUP_KEEP]:
+                old.unlink()
+            print(f"backup {b.group(1)} ({n} bytes) from {self.client_address[0]}", flush=True)
+            return self.reply(200, {"ok": True})
         if self.path in ("/v1/block", "/v1/unblock"):
             try:
                 n = int(self.headers.get("Content-Length") or 0)
