@@ -5,6 +5,8 @@ import ipaddress
 import json
 import time
 
+import psutil
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -14,7 +16,7 @@ from node_agent import hostsec
 import nodes
 import sites
 from core import BANNED, IP_LABELS, _security_config, ban, ban_key, db, is_trusted, labeled, local_name, raise_alert, require_auth
-from monitor import _systemctl, load_events_data, managed_units, services_data, status_data
+from monitor import UNIT_RE, _systemctl, load_events_data, managed_units, services_data, status_data, updates_cached
 from routes_nodes import hub
 
 
@@ -107,6 +109,43 @@ async def _fix_block_host(nid, ip: str, reason: str):
     return code == 200, data.get("detail", "")
 
 
+def _public_ports() -> list[dict]:
+    out = {}
+    for c in psutil.net_connections(kind="inet"):
+        if c.status == psutil.CONN_LISTEN and not ipaddress.ip_address(c.laddr.ip.split("%")[0]).is_loopback:
+            try:
+                name = psutil.Process(c.pid).name() if c.pid else None
+            except psutil.Error:
+                name = None
+            out[c.laddr.port] = {"port": c.laddr.port, "bind": c.laddr.ip, "process": name}
+    return sorted(out.values(), key=lambda x: x["port"])[:30]
+
+
+def _posture() -> dict:
+    """Security settings of the dashboard and every server, for the weekly AI audit (facts only, no secrets)."""
+    upd = updates_cached() or {}
+    blk = hostsec.blocked()
+    sessions = db("SELECT COUNT(*) c FROM sessions", one=True)["c"]
+    out = {"대시보드": {**_security_config(), "영구차단IP수": len(BANNED), "활성세션수": sessions,
+                     "웹접속": "Cloudflare Tunnel 경유(127.0.0.1 바인딩)"},
+           local_name(): {**hostsec.security_facts(), "업데이트": upd, "외부노출포트": _public_ports(),
+                          "자동방화벽차단(sm-block)": "미설치" if blk is None else f"설치됨, 차단 {len(blk)}개"}}
+    for n in hub.nodes():
+        st = hub.state.get(n["id"]) or {}
+        data = st.get("data") or {}
+        hf = data.get("host_facts") or {}
+        if not st.get("online"):
+            out[n["name"]] = {"온라인": False}
+            continue
+        nb = hf.get("blocker")
+        out[n["name"]] = {**(hf.get("security") or {"보안정보": "에이전트 1.6 미만이라 없음"}),
+                          "업데이트": data.get("updates"), "에이전트버전": data.get("version"),
+                          "외부노출포트": [{"port": p["port"], "process": p.get("process")}
+                                     for p in (data.get("now") or {}).get("ports", []) if p.get("public")][:30],
+                          "자동방화벽차단(sm-block)": "미설치" if nb is None else f"설치됨, 차단 {len(nb)}개"}
+    return out
+
+
 def _tailnet(ip: str) -> bool:
     try:
         a = ipaddress.ip_address(ip)
@@ -121,7 +160,7 @@ analyst = agent.Analyst(db=db, services_fn=lambda: services_data()["services"], 
                         nodes_fn=lambda start=None, end=None: hub.summary(start, end), local_name_fn=local_name,
                         fixers={"restart_local": _fix_restart_local, "restart_node": _fix_restart_node,
                                 "ban_ip": _fix_ban, "node_problems": _node_problems, "alert": raise_alert,
-                                "ssh_attackers": _ssh_attackers, "block_host": _fix_block_host},
+                                "ssh_attackers": _ssh_attackers, "block_host": _fix_block_host, "posture": _posture},
                         node_fn=lambda nid: (hub.get(nid), (hub.state.get(nid) or {}).get("data")),
                         node_ids_fn=lambda: [n["id"] for n in hub.nodes()],
                         sites_fn=sites.summary)
@@ -149,11 +188,15 @@ async def ai_status(request: Request, node: int | None = None):
             out.append(d)
         return out
     reports = load("SELECT id, ts, trigger, risk, content, duration, tps FROM ai_reports "
-                   "WHERE trigger != '일일' AND COALESCE(node_id, 0) = ? ORDER BY id DESC LIMIT 30", (node or 0,))
+                   "WHERE trigger NOT IN ('일일', '보안점검') AND COALESCE(node_id, 0) = ? ORDER BY id DESC LIMIT 30", (node or 0,))
     daily = load("SELECT id, ts, trigger, risk, content, duration, tps, day FROM ai_reports "
                  "WHERE trigger = '일일' AND COALESCE(node_id, 0) = ? AND ts >= ? ORDER BY day DESC",
                  (node or 0, int(time.time()) - agent.REPORT_RETENTION))
-    return {**health, "reports": reports, "daily": daily}
+    audits = load("SELECT id, ts, trigger, risk, content, duration, tps FROM ai_reports "
+                  "WHERE trigger = '보안점검' ORDER BY id DESC LIMIT 12")
+    for a, r in zip(audits, db("SELECT content FROM ai_reports WHERE trigger = '보안점검' ORDER BY id DESC LIMIT 12")):
+        a["score"] = json.loads(r["content"]).get("score")
+    return {**health, "reports": reports, "daily": daily, "audits": audits}
 
 
 @router.get("/api/ai/report/{rid}")
@@ -193,6 +236,73 @@ async def ai_briefing(request: Request, body: BriefBody | None = None):
     request.state.detail = "briefing"
     _briefing_task = asyncio.create_task(analyst.briefing("수동", node))
     return {"started": True}
+
+
+async def _ai_ready():
+    if analyst.lock.locked() or (_briefing_task and not _briefing_task.done()):
+        raise HTTPException(409, f"AI가 이미 작업 중입니다 ({analyst.busy or '대기'}).")
+    if not (await analyst.health())["online"]:
+        raise HTTPException(503, "AI를 사용할 수 없습니다.")
+
+
+@router.post("/api/ai/audit")
+async def ai_audit(request: Request):
+    global _briefing_task
+    require_auth(request)
+    await _ai_ready()
+    request.state.event = "ai"
+    request.state.detail = "security audit"
+    _briefing_task = asyncio.create_task(analyst.security_audit(await asyncio.to_thread(_posture)))
+    return {"started": True}
+
+
+class LogBody(BaseModel):
+    unit: str = Field(min_length=1, max_length=120)
+    node: int | None = None
+
+
+@router.post("/api/ai/analyze-log")
+async def ai_analyze_log(request: Request, body: LogBody):
+    require_auth(request)
+    _check_node(body.node)
+    await _ai_ready()
+    if body.node is None:
+        if not UNIT_RE.match(body.unit) or body.unit not in managed_units():
+            raise HTTPException(404, "unknown unit")
+        server, log = local_name(), await asyncio.to_thread(hostsec.service_logs, body.unit, 300, True)
+    else:
+        node = hub.get(body.node)
+        if not nodes.UNIT_RE.match(body.unit):
+            raise HTTPException(400, "bad unit")
+        try:
+            r = await hub.client.get(f"{node['address']}/v1/logs/{body.unit}?lines=300",
+                                     headers={"Authorization": f"Bearer {node['token']}"})
+            r.raise_for_status()
+            server, log = node["name"], r.json().get("log", "")
+        except Exception as e:
+            raise HTTPException(502, f"로그를 가져오지 못했습니다 ({type(e).__name__})")
+    request.state.event = "ai"
+    request.state.detail = f"log {body.unit}"
+    try:
+        return await analyst.analyze_log(server, body.unit, log or "(로그 없음)")
+    except Exception as e:
+        raise HTTPException(502, f"AI 분석 실패 ({type(e).__name__})")
+
+
+async def assess_new_login(ip: str, country: str, ua: str, email: str | None):
+    """New-IP login: the AI compares it with the admin's usual pattern; alert only when it looks off."""
+    try:
+        for _ in range(60):  # wait (max ~10 min) instead of failing if a report is being written
+            if not analyst.lock.locked():
+                break
+            await asyncio.sleep(10)
+        r = await analyst.assess_login(ip, country, ua, email)
+    except Exception:
+        return  # the plain new_ip alert has already gone out
+    if r.get("risk") in ("medium", "high"):
+        await asyncio.to_thread(raise_alert, "login_risk", ip, country,
+                                f"AI 판단: 위험도 {'높음' if r['risk'] == 'high' else '중간'} — {r.get('reason', '')[:250]}\n"
+                                "본인이 아니면 보안 탭 › 활성 세션에서 끊고 IP를 차단하세요.")
 
 
 class ChatTurn(BaseModel):

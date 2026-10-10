@@ -393,3 +393,8 @@ td.nowrap { white-space: nowrap; }
 .log-view { max-height: 65vh; overflow: auto; white-space: pre-wrap; word-break: break-all; background: var(--surface-2);
   padding: 10px 12px; border-radius: 8px; font-size: 12px; line-height: 1.45; margin: 8px 0 0; }
 #siteForm .input:first-child { flex: 0 0 160px; }
+
+.audit-score { display: flex; gap: 12px; align-items: center; margin: 8px 0 12px; }
+.audit-score .pill { font-size: 1.25rem; padding: 4px 12px; }
+.audit-hist { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.log-ai { margin-bottom: 10px; }

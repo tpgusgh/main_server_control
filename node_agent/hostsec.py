@@ -3,6 +3,7 @@ import ipaddress
 import json
 import re
 import subprocess
+from pathlib import Path
 
 SM_BLOCK = "/usr/local/sbin/sm-block"
 INTERNAL = [ipaddress.ip_network(n) for n in ("100.64.0.0/10", "fd7a:115c:a1e0::/48")]
@@ -161,3 +162,43 @@ def service_logs(unit: str, lines: int = 200, user: bool = True) -> str:
         return f"로그를 읽지 못했습니다 ({type(e).__name__})"
     out = (r.stdout or r.stderr or "").strip() or "기록된 로그가 없습니다."
     return out[-200_000:]
+
+
+def _read(path, default=""):
+    try:
+        return Path(path).read_text()
+    except OSError:
+        return default
+
+
+def sshd_value(key, default):
+    """First match wins, Include files are read in place, Match blocks end the global section (sshd semantics)."""
+    def walk(path):
+        for raw in _read(path).splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            k, _, v = line.partition(" ")
+            if k.lower() == "match":
+                return "stop"
+            if k.lower() == "include":
+                for pat in v.split():
+                    pat = pat if pat.startswith("/") else "/etc/ssh/" + pat
+                    for inc in sorted(Path("/").glob(pat.lstrip("/"))):
+                        r = walk(inc)
+                        if r is not None:
+                            return r
+            elif k.lower() == key.lower():
+                return v.strip()
+        return None
+    r = walk("/etc/ssh/sshd_config")
+    return default if r in (None, "stop") else r
+
+
+def security_facts():
+    keys = Path.home() / ".ssh" / "authorized_keys"
+    return {"ssh_password_auth": sshd_value("PasswordAuthentication", "yes"),
+            "ssh_root_login": sshd_value("PermitRootLogin", "prohibit-password"),
+            "authorized_keys": sum(1 for l in _read(keys).splitlines() if l.strip() and not l.startswith("#")),
+            "firewall": "on" if re.search(r"^ENABLED=yes", _read("/etc/ufw/ufw.conf"), re.M) else "off",
+            "reboot_required": Path("/var/run/reboot-required").exists()}

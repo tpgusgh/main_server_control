@@ -120,6 +120,48 @@ def safe_path(p: str) -> str:
     return SAFE_PATH.sub("", p or "")[:60]
 
 
+SECRET_PATTERNS = [
+    re.compile(r"sk-ant-[A-Za-z0-9_-]+"), re.compile(r"gh[opsu]_[A-Za-z0-9]{20,}"),
+    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}"),
+    re.compile(r"(?i)((?:pass(?:word)?|passwd|secret|token|api[_-]?key|auth|cookie|session)[\"']?\s*[:=]\s*)[^\s,;&\"']+"),
+    re.compile(r"\b[A-Za-z0-9+/_-]{40,}={0,2}\b"),  # long opaque blobs (keys, JWTs)
+]
+
+
+def redact(text: str) -> str:
+    """Mask secrets before any log text leaves this machine for the AI."""
+    for rx in SECRET_PATTERNS:
+        text = rx.sub(lambda m: (m.group(1) if m.groups() else "") + "[가림]", text)
+    return text
+
+
+LOG_SCHEMA = {"type": "object", "properties": {
+    "summary": {"type": "string", "maxLength": 300},
+    "problems": {"type": "array", "maxItems": 5, "items": {"type": "object", "properties": {
+        "severity": {"type": "string", "enum": ["info", "warn", "critical"]},
+        "title": {"type": "string", "maxLength": 80}, "detail": {"type": "string", "maxLength": 300}},
+        "required": ["severity", "title", "detail"]}},
+    "fixes": {"type": "array", "maxItems": 5, "items": {"type": "string", "maxLength": 300}}},
+    "required": ["summary", "problems", "fixes"]}
+
+LOGIN_SCHEMA = {"type": "object", "properties": {
+    "risk": {"type": "string", "enum": ["low", "medium", "high"]},
+    "reason": {"type": "string", "maxLength": 300}}, "required": ["risk", "reason"]}
+
+AUDIT_SCHEMA = {"type": "object", "properties": {
+    "score": {"type": "integer", "minimum": 0, "maximum": 100},
+    "summary": {"type": "string", "maxLength": 400},
+    "checks": {"type": "array", "maxItems": 25, "items": {"type": "object", "properties": {
+        "server": {"type": "string", "maxLength": 40},
+        "item": {"type": "string", "maxLength": 60},
+        "status": {"type": "string", "enum": ["ok", "warn", "fail"]},
+        "detail": {"type": "string", "maxLength": 200},
+        "fix": {"type": "string", "maxLength": 200}},
+        "required": ["server", "item", "status", "detail", "fix"]}}},
+    "required": ["score", "summary", "checks"]}
+AUDIT_EVERY = 7 * 86400
+
+
 class _Resp:
     """Just enough of httpx.Response for the call sites (raise_for_status + json)."""
     def __init__(self, data=None, error: str | None = None):
@@ -750,7 +792,7 @@ class Analyst:
     def due_trigger(self) -> str | None:
         if self._backoff.get(("event",), 0) > time.time():
             return None
-        last = self.db("SELECT MAX(ts) t FROM ai_reports WHERE trigger != '일일' AND node_id IS NULL", one=True)["t"] or 0
+        last = self.db("SELECT MAX(ts) t FROM ai_reports WHERE trigger NOT IN ('일일', '보안점검') AND node_id IS NULL", one=True)["t"] or 0
         now = time.time()
         if BRIEFING_HOURS > 0 and now - last >= BRIEFING_HOURS * 3600:
             return "정기"
@@ -760,6 +802,79 @@ class Analyst:
             if any(e["end"] > last and set(e["reasons"]) - {"온도"} for e in self.events_fn()["events"]):
                 return "고부하 발생"
         return None
+
+    # ------------------------------------------------------------ security agent tasks (read-only, answers only)
+
+    async def _structured(self, busy: str, system_extra: str, user: str, schema: dict, max_tokens: int = 1200) -> dict:
+        async with self.lock:
+            self.busy = busy
+            try:
+                r = await self._chat({
+                    "messages": [{"role": "system", "content": f"{SYSTEM_RULES}{system_extra}{self.memory_block()}"},
+                                 {"role": "user", "content": user}],
+                    "temperature": 0.2, "max_tokens": max_tokens,
+                    "response_format": {"type": "json_schema", "json_schema": {"name": "out", "schema": schema}}})
+                r.raise_for_status()
+                return json.loads(r.json()["choices"][0]["message"]["content"])
+            finally:
+                self.busy = None
+
+    async def analyze_log(self, server: str, unit: str, log: str) -> dict:
+        text = redact(log[-14000:])  # newest part; secrets masked before it leaves the machine
+        return await self._structured(
+            "서비스 로그 분석 중", "",
+            f"<data>\n서버: {server}\n서비스: {unit}\n최근 로그:\n{text}\n</data>\n\n"
+            "이 로그를 분석해. summary는 지금 상태 1~2문장. problems는 실제로 보이는 오류·경고만(없으면 빈 배열), "
+            "fixes는 관리자가 직접 할 수 있는 구체적인 해결 방법(명령어 포함 가능). 로그에 없는 내용은 추측하지 마.",
+            LOG_SCHEMA)
+
+    def login_context(self, ip: str) -> dict:
+        """What 'normal' looks like for this admin, to judge one new login against."""
+        since = int(time.time()) - 90 * 86400
+        rows = self.db("SELECT ts, ip, country, ua FROM access_log WHERE event='login_ok' AND ts>=? ORDER BY id DESC LIMIT 300",
+                       (since,))
+        countries, hours, agents = {}, {}, {}
+        for r in rows:
+            countries[r["country"] or "?"] = countries.get(r["country"] or "?", 0) + 1
+            h = datetime.fromtimestamp(r["ts"], TZ).hour
+            hours[h] = hours.get(h, 0) + 1
+            ua = (r["ua"] or "")[:60]
+            agents[ua] = agents.get(ua, 0) + 1
+        fails = self.db("SELECT COUNT(*) c FROM access_log WHERE ip=? AND event='login_fail' AND ts>?",
+                        (ip, int(time.time()) - 86400), one=True)["c"]
+        return {"지난90일_로그인_국가별": countries, "지난90일_로그인_시간대별(KST시)": dict(sorted(hours.items())),
+                "지난90일_브라우저별": dict(sorted(agents.items(), key=lambda kv: -kv[1])[:8]),
+                "이IP_24시간_로그인실패": fails, "신뢰IP": self.is_trusted(ip), "IP이름": self.ip_labels.get(ip)}
+
+    async def assess_login(self, ip: str, country: str, ua: str, email: str | None) -> dict:
+        ctx = await asyncio.to_thread(self.login_context, ip)
+        now = datetime.now(TZ).strftime("%m-%d %H:%M")
+        return await self._structured(
+            "새 로그인 위험도 판단 중", "",
+            f"<data>\n방금 로그인(처음 보는 IP): 시각 {now} KST, IP {ip}, 국가 {country or '?'}, "
+            f"Access 이메일 {email or '-'}, 브라우저 {ua[:200]}\n평소 패턴: {json.dumps(ctx, ensure_ascii=False)}\n</data>\n\n"
+            "이 로그인이 관리자 본인일 가능성을 평소 패턴과 비교해 판단해. 국가·시간대·브라우저가 평소와 같고 "
+            "실패 시도가 없으면 low. 처음 보는 국가, 평소와 전혀 다른 브라우저, 직전 실패 다수 등이 겹치면 high. "
+            "모바일 IP는 자주 바뀌는 게 정상이다. reason은 근거 1~2문장.", LOGIN_SCHEMA, max_tokens=300)
+
+    async def security_audit(self, posture: dict) -> dict:
+        t0 = time.time()
+        out = await self._structured(
+            "보안 점검 중", "",
+            f"<data>\n{json.dumps(posture, ensure_ascii=False, separators=(',', ':'))}\n</data>\n\n"
+            "위 데이터는 대시보드와 모든 서버의 보안 설정이다. 항목별로 점검해 checks를 만들어라 "
+            "(server는 서버 이름 또는 '대시보드'). status: ok/warn/fail, fix는 관리자가 할 수 있는 구체적 조치. "
+            "<memory>에서 관리자가 정한 선택(예: SSH 비밀번호 방식)은 fail로 매기지 말고 ok로 두되 detail에 '관리자 선택'이라고 적어라. "
+            "score는 0~100(fail 많을수록 낮게). summary는 가장 중요한 개선점 위주 2문장. 데이터에 없는 건 점검하지 마.",
+            AUDIT_SCHEMA, max_tokens=2500)
+        self.db("INSERT INTO ai_reports(ts,trigger,risk,content,duration,tps) VALUES(?,?,?,?,?,?)",
+                (int(time.time()), "보안점검", "low" if out["score"] >= 80 else "medium" if out["score"] >= 50 else "high",
+                 json.dumps(out, ensure_ascii=False), round(time.time() - t0, 1), None))
+        return out
+
+    def audit_due(self) -> bool:
+        last = self.db("SELECT MAX(ts) t FROM ai_reports WHERE trigger='보안점검'", one=True)["t"] or 0
+        return time.time() - last >= AUDIT_EVERY and self._backoff.get(("audit",), 0) <= time.time()
 
     # ------------------------------------------------------------ auto-fix of red security/ops items
 
@@ -933,6 +1048,9 @@ class Analyst:
                             if trigger:
                                 key = ("event",)
                                 await self.briefing(trigger)
+                            elif "posture" in self.fixers and await asyncio.to_thread(self.audit_due):
+                                key = ("audit",)
+                                await self.security_audit(await asyncio.to_thread(self.fixers["posture"]))
                     except Exception:
                         if key:
                             self._backoff[key] = time.time() + 3600

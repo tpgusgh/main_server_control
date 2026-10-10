@@ -339,3 +339,26 @@ class ClaudeBackend(unittest.TestCase):
         self.assertNotIn("ANTHROPIC_API_KEY", captured["env"], "never bill an API key by accident")
         self.assertEqual(_json.loads(out["choices"][0]["message"]["content"]), {"risk": "low"})
         self.assertEqual(captured["stdin"], "q")
+
+
+class SecurityAgent(unittest.TestCase):
+    def test_redact_masks_secrets_keeps_context(self):
+        log = ("Oct 10 app[1]: login password=hunter2hunter ok\n"
+               "Authorization: Bearer abcdefghijklmnop.qrstu\n"
+               "token: sk-ant-oat01-AAAAbbbbCCCC gho_" + "x" * 30 + "\n"
+               "jwt eyJ" + "a" * 60 + "\nERROR port 8080 in use")
+        out = agent.redact(log)
+        for secret in ("hunter2hunter", "abcdefghijklmnop", "sk-ant-oat01", "gho_xxx", "eyJaaa"):
+            self.assertNotIn(secret, out)
+        self.assertIn("password=[가림]", out)
+        self.assertIn("ERROR port 8080 in use", out)
+
+    def test_audit_runs_weekly_and_skips_event_briefing_clock(self):
+        a, _ = make_analyst()
+        self.assertTrue(a.audit_due())
+        a.db("INSERT INTO ai_reports(ts,trigger,risk,content,duration,tps) VALUES(?,?,?,?,?,?)",
+             (int(time.time()), "보안점검", "low", '{"score":90,"summary":"","checks":[]}', 1, None))
+        self.assertFalse(a.audit_due())
+        a._backoff[("audit",)] = 0
+        a.db("UPDATE ai_reports SET ts=?", (int(time.time()) - agent.AUDIT_EVERY - 1,))
+        self.assertTrue(a.audit_due())

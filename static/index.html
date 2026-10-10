@@ -228,6 +228,10 @@
       <div id="dailyView"></div>
     </div>
 
+    <div class="section-title"><h2>보안 점검</h2><span class="sub">모든 서버의 SSH·방화벽·업데이트·노출 포트 등을 AI가 100점 만점으로 평가 · 매주 자동</span>
+      <div class="right"><button class="btn" id="auditBtn">지금 점검</button></div></div>
+    <div class="card" id="auditView"></div>
+
     <div class="section-title"><h2>보안 · 운영 브리핑</h2><span class="sub" id="briefMeta"></span>
       <div class="right"><button class="btn primary" id="briefBtn">지금 분석</button></div></div>
     <div class="card" id="briefing"></div>
@@ -388,7 +392,8 @@
 
 <dialog id="logModal" class="wide" aria-labelledby="logTitle">
   <div class="modal-head"><h3 id="logTitle"></h3>
-    <span><button class="btn" type="button" id="logRefresh">새로고침</button> <button class="btn" type="button" id="logClose">닫기</button></span></div>
+    <span><button class="btn primary" type="button" id="logAi">AI로 분석</button> <button class="btn" type="button" id="logRefresh">새로고침</button> <button class="btn" type="button" id="logClose">닫기</button></span></div>
+  <div id="logAiOut"></div>
   <pre class="log-view mono" id="logBody"></pre>
 </dialog>
 

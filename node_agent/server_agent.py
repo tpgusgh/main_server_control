@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # hostsec.py ships next to this file
 import hostsec  # noqa: E402
 
-VERSION = "1.8"
+VERSION = "1.9"
 CONFIG_PATH = Path(os.environ.get("AGENT_CONFIG", Path(__file__).resolve().parent / "config.json"))
 UNIT_RE = re.compile(r"^[A-Za-z0-9@._-]+\.service$")
 SAMPLE_INTERVAL = 10
@@ -176,39 +176,6 @@ def login_sessions():
     return out
 
 
-def sshd_value(key, default):
-    """First match wins, Include files are read in place, Match blocks end the global section (sshd semantics)."""
-    def walk(path):
-        for raw in read(path).splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            k, _, v = line.partition(" ")
-            if k.lower() == "match":
-                return "stop"
-            if k.lower() == "include":
-                for pat in v.split():
-                    pat = pat if pat.startswith("/") else "/etc/ssh/" + pat
-                    for inc in sorted(Path("/").glob(pat.lstrip("/"))):
-                        r = walk(inc)
-                        if r is not None:
-                            return r
-            elif k.lower() == key.lower():
-                return v.strip()
-        return None
-    r = walk("/etc/ssh/sshd_config")
-    return default if r in (None, "stop") else r
-
-
-def security_facts():
-    keys = Path.home() / ".ssh" / "authorized_keys"
-    return {"ssh_password_auth": sshd_value("PasswordAuthentication", "yes"),
-            "ssh_root_login": sshd_value("PermitRootLogin", "prohibit-password"),
-            "authorized_keys": sum(1 for l in read(keys).splitlines() if l.strip() and not l.startswith("#")),
-            "firewall": "on" if re.search(r"^ENABLED=yes", read("/etc/ufw/ufw.conf"), re.M) else "off",
-            "reboot_required": Path("/var/run/reboot-required").exists()}
-
-
 def power_state():
     """logind's answer for this user: "yes" (allowed), "challenge" (needs allow-power.sh once), "no"."""
     out = {}
@@ -297,7 +264,7 @@ class Sampler(threading.Thread):
         self.latest["ports"], self.latest["inbound"], self.latest["outbound"] = sockets()
         if now - self._host_t > 60:  # journal/loginctl are slower: once a minute is plenty
             self._host_t = now
-            self.host = {"ssh": hostsec.ssh_events(), "sessions": login_sessions(), "security": security_facts(),
+            self.host = {"ssh": hostsec.ssh_events(), "sessions": login_sessions(), "security": hostsec.security_facts(),
                          "power": power_state(), "blocker": hostsec.blocked()}  # None = install-blocker.sh not run
 
     def run(self):

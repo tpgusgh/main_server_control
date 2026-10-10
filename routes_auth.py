@@ -17,6 +17,7 @@ from core import ACCESS_RETENTION, BANNED, BAN_AFTER_FAILS, COOKIE, FAIL_WINDOW,
 
 
 router = APIRouter()
+_bg: set = set()  # keep background tasks referenced until done
 
 # ---------------------------------------------------------------- pages & auth
 
@@ -114,6 +115,10 @@ async def login(request: Request, body: LoginBody):
         await run_in_threadpool(raise_alert, "new_ip", ip, country,
                                 "처음 보는 IP에서 로그인 성공" + (f" · {request.state.email}" if request.state.email else "") +
                                 f"\n{request.headers.get('user-agent', '')[:120]}")
+        from routes_ai import assess_new_login  # lazy: routes_ai imports this module's siblings
+        t = asyncio.create_task(assess_new_login(ip, country, request.headers.get("user-agent", ""), request.state.email))
+        _bg.add(t)
+        t.add_done_callback(_bg.discard)
     resp = JSONResponse({"ok": True})
     resp.set_cookie(COOKIE, token, max_age=SESSION_MAX, path="/", secure=True, httponly=True, samesite="strict")
     return resp

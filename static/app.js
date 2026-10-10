@@ -690,11 +690,31 @@ function statsGrid(st) {
     statBox("다른 서버", `${(st.다른서버 || []).length}대`, nodesBad.length ? `끊김: ${nodesBad.join(", ")}` : null));
 }
 
+const CHECK = { ok: ["양호", "good"], warn: ["주의", "warn"], fail: ["취약", "crit"] };
+function auditBody(c) {
+  const order = { fail: 0, warn: 1, ok: 2 };
+  return [h("div", { class: "audit-score" }, h("span", { class: `num pill ${c.score >= 80 ? "good" : c.score >= 50 ? "warn" : "crit"}` }, `${c.score}점`),
+      h("span", { class: "brief-summary" }, ...md(c.summary))),
+    h("ul", { class: "findings" }, [...c.checks].sort((a, b) => order[a.status] - order[b.status]).map((k) => {
+      const [lbl, cls] = CHECK[k.status] || [k.status, ""];
+      return h("li", {}, h("span", { class: `pill ${cls}` }, lbl),
+        h("div", {}, h("b", {}, `${k.server} · `, ...md(k.item)), h("div", { class: "ink2" }, ...md(k.detail)),
+          k.status !== "ok" && k.fix ? h("div", { class: "muted" }, "해결: ", ...md(k.fix)) : null));
+    }))];
+}
+
 /** Full report (briefing or daily) in a modal; the page itself only shows the banner + summary. */
 async function openReport(id) {
   let r;
   try { r = await api(`/api/ai/report/${id}`); } catch (err) { toast(err.message, true); return; }
   const c = r.content;
+  if (r.trigger === "보안점검") {
+    put($("reportBody"), h("div", { class: "modal-head" }, h("h3", {}, `보안 점검 · ${fmtDateTime(r.ts)}`),
+      h("button", { class: "btn", type: "button", onclick: () => $("reportModal").close() }, "닫기")), ...auditBody(c),
+      h("p", { class: "muted ai-note" }, "ⓘ AI는 점검만 하고 아무것도 바꾸지 않습니다. 해결 방법은 직접 확인 후 적용하세요."));
+    $("reportModal").showModal();
+    return;
+  }
   put($("reportBody"),
     h("div", { class: "modal-head" }, h("h3", {}, r.day ? `${r.day} 일일 보고서` : `${r.trigger} 브리핑`),
       h("button", { class: "btn", type: "button", onclick: () => $("reportModal").close() }, "닫기")),
@@ -750,6 +770,14 @@ async function loadAi() {
     st.online ? null : h("span", { class: "muted" }, "서비스 탭에서 llm.service 를 켜세요"));
   $("briefBtn").disabled = !st.online || !!st.busy;
   $("briefBtn").textContent = st.busy === "브리핑 생성 중" ? "분석 중… (2~4분)" : "지금 분석";
+  const au = st.audits || [];
+  $("auditBtn").disabled = !st.online || !!st.busy;
+  $("auditBtn").textContent = st.busy === "보안 점검 중" ? "점검 중…" : "지금 점검";
+  put($("auditView"), au.length ? [h("div", { class: "audit-hist" }, au.map((a) => h("button", { class: "btn", onclick: () => openReport(a.id) },
+      h("b", { class: "num" }, `${a.score ?? "–"}점`), ` ${fmtDateTime(a.ts)}`))),
+    h("p", { class: "brief-summary" }, ...md(au[0].summary)),
+    h("button", { class: "btn", onclick: () => openReport(au[0].id) }, "점검표 자세히 보기")]
+    : h("p", { class: "muted" }, "아직 점검 기록이 없습니다. ‘지금 점검’을 누르면 1~2분 뒤 결과가 나옵니다."));
   const latest = st.reports[0];
   if (!latest || aiShownReport !== latest.id) {
     aiShownReport = latest ? latest.id : null;
@@ -760,6 +788,11 @@ async function loadAi() {
     h("td", { class: "num" }, fmtDateTime(r.ts)), h("td", {}, r.trigger), h("td", {}, riskPill(r.risk)),
     h("td", { class: "ellipsis" }, r.summary), h("td", { class: "r num" }, `${r.duration}s`))), 5, "기록이 없습니다");
 }
+
+$("auditBtn").addEventListener("click", async () => {
+  try { await post("/api/ai/audit", {}); toast("보안 점검을 시작했습니다. 1~2분 걸립니다."); loadAi(); }
+  catch (err) { toast(err.message, true); }
+});
 
 $("briefBtn").addEventListener("click", async () => {
   try { await post("/api/ai/briefing", { node: currentNode }); toast("분석을 시작했습니다. 2~4분 걸립니다."); loadAi(); }
@@ -1197,6 +1230,7 @@ async function openLogs(unit, node) {
   logTarget = { unit, node };
   $("logTitle").textContent = `${node ? node.name : "이 서버"} · ${unit} 최근 로그`;
   $("logBody").textContent = "불러오는 중…";
+  $("logAiOut").replaceChildren();
   if (!$("logModal").open) $("logModal").showModal();
   try {
     const r = await api(node ? `/api/nodes/${node.id}/services/${encodeURIComponent(unit)}/logs?lines=300`
@@ -1207,6 +1241,19 @@ async function openLogs(unit, node) {
 }
 $("logRefresh").addEventListener("click", () => logTarget && openLogs(logTarget.unit, logTarget.node));
 $("logClose").addEventListener("click", () => $("logModal").close());
+$("logAi").addEventListener("click", async () => {
+  if (!logTarget) return;
+  const btn = $("logAi");
+  btn.disabled = true; btn.textContent = "분석 중…";
+  put($("logAiOut"), h("p", { class: "muted" }, "비밀번호·토큰은 가린 뒤 AI에게 보냅니다. 30초~1분 걸려요."));
+  try {
+    const r = await post("/api/ai/analyze-log", { unit: logTarget.unit, node: logTarget.node ? logTarget.node.id : null });
+    put($("logAiOut"), h("div", { class: "card log-ai" }, h("p", { class: "brief-summary" }, ...md(r.summary)),
+      findingsList({ findings: r.problems }),
+      r.fixes.length ? h("div", {}, h("div", { class: "muted" }, "해결 방법"), h("ol", {}, r.fixes.map((f) => h("li", {}, ...md(f))))) : null));
+  } catch (err) { put($("logAiOut"), h("p", { class: "muted" }, `⚠ ${err.message}`)); }
+  finally { btn.disabled = false; btn.textContent = "AI로 분석"; }
+});
 
 // ---------------------------------------------------------------- website checks
 
