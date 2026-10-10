@@ -1157,8 +1157,8 @@ async function renderNodeSecurity(n) {
   const fact = (ok, k, v) => h("li", {}, h("span", { class: `pill ${ok ? "good" : "crit"}` }, ok ? "양호" : "주의"), h("b", {}, k), " — ", v);
   $("rSecMeta").textContent = sec ? `${n.name} · 1분마다 갱신` : "";
   put($("rSecFacts"), sec ? [
-    fact(sec.ssh_password_auth === "no", "SSH 비밀번호 로그인", sec.ssh_password_auth === "no" ? "꺼짐 (키로만 접속)" : "켜짐 — 키 등록 후 끄는 걸 권장 (scripts/harden-ssh.sh)"),
-    fact(sec.authorized_keys > 0, "등록된 SSH 키", `${sec.authorized_keys}개`),
+    h("li", {}, h("span", { class: "pill" }, "정보"), h("b", {}, "SSH 로그인 방식"), " — ",
+      sec.ssh_password_auth === "no" ? "키 전용" : `비밀번호 (관리자 선택) · 등록된 키 ${sec.authorized_keys}개`),
     fact(sec.ssh_root_login !== "yes", "root SSH 로그인", sec.ssh_root_login),
     fact(sec.firewall === "on", "방화벽(ufw)", sec.firewall === "on" ? "켜짐" : "꺼짐"),
     fact(fails.length < 5, "SSH 로그인 실패 (24시간)", hf.ssh === null ? "로그 읽기 권한 없음" : `${fails.length}회`),
