@@ -302,3 +302,40 @@ class RetryBackoff(unittest.TestCase):
         self.assertIsNone(a.due_trigger())
         a.events_fn = lambda: {"events": [{"end": time.time(), "reasons": ["CPU", "온도"]}]}
         self.assertEqual(a.due_trigger(), "고부하 발생")
+
+
+class ClaudeBackend(unittest.TestCase):
+    def test_runs_without_tools_or_api_key_and_reads_structured_output(self):
+        import asyncio
+        import json as _json
+        import os as _os
+        captured = {}
+
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self, data):
+                captured["stdin"] = data.decode()
+                return _json.dumps({"is_error": False, "result": "", "structured_output": {"risk": "low"}}).encode(), b""
+
+        async def fake_exec(*args, **kw):
+            captured["args"], captured["env"] = args, kw["env"]
+            return FakeProc()
+
+        real = asyncio.create_subprocess_exec
+        asyncio.create_subprocess_exec = fake_exec
+        _os.environ["ANTHROPIC_API_KEY"] = "sk-should-not-leak"
+        try:
+            out = asyncio.run(agent.claude_complete({
+                "messages": [{"role": "system", "content": "rules"}, {"role": "user", "content": "q"}],
+                "response_format": {"json_schema": {"schema": {"type": "object"}}}}))
+        finally:
+            asyncio.create_subprocess_exec = real
+            _os.environ.pop("ANTHROPIC_API_KEY", None)
+        args = captured["args"]
+        self.assertEqual(args[args.index("--tools") + 1], "", "every built-in tool off")
+        self.assertIn("--safe-mode", args)
+        self.assertIn("mcp__*", args)
+        self.assertNotIn("ANTHROPIC_API_KEY", captured["env"], "never bill an API key by accident")
+        self.assertEqual(_json.loads(out["choices"][0]["message"]["content"]), {"risk": "low"})
+        self.assertEqual(captured["stdin"], "q")

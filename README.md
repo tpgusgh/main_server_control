@@ -109,6 +109,15 @@ Cloudflare Zero Trust → Access → Applications 에 호스트를 추가(허용
 llama.cpp CPU 빌드(`llama-bXXXX-bin-ubuntu-x64.tar.gz`)와 GGUF 모델(예: Qwen3-4B-Instruct Q4_K_M, 약 2.5GB)을 `~/llm`에 두고 `deploy/systemd/llm.service`를 등록합니다. `~/llm/llm.env`의 `LLAMA_API_KEY`와 `.env`의 `SM_LLM_API_KEY`를 같은 값으로 맞춥니다.
 4코어 노트북 CPU 기준 생성 약 5토큰/초 — 보고서 1건 2~5분이라 밤에 서버별로 나눠 실행합니다.
 
+### 3-1. Claude Code 백엔드 (선택 — 로컬 CPU 대신)
+로컬 LLM이 CPU·열 부담이면 Claude Code(Pro 이상)를 **개발용과 다른 계정**으로 쓸 수 있습니다.
+```bash
+mkdir -m 700 ~/.claude-monitor
+CLAUDE_CONFIG_DIR=~/.claude-monitor claude setup-token   # 다른 계정으로 로그인 → 1년짜리 토큰 출력
+```
+`.env`에 `SM_AI_BACKEND=claude`, `SM_CLAUDE_OAUTH_TOKEN=<토큰>`을 넣고 재시작하면 됩니다(`llm.service`는 꺼도 됨).
+호출은 `claude -p --safe-mode --tools "" --disallowedTools "mcp__*" --no-session-persistence`로 — **도구·MCP·사용자 설정 없이** 텍스트만 주고받고, `ANTHROPIC_API_KEY`는 제거한 채 실행합니다. 이 경우 AI 입력 데이터(서버 상태·접속 IP 등)는 Anthropic으로 전송됩니다.
+
 ### 4. 원격 서버 추가
 ```bash
 scp -r ~/server-monitor/node_agent <user>@<원격_Tailscale_IP>:~/

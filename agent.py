@@ -20,6 +20,12 @@ import alerts
 
 LLM_URL = os.environ.get("SM_LLM_URL", "http://127.0.0.1:8180").rstrip("/")
 LLM_KEY = os.environ.pop("SM_LLM_API_KEY", "")
+# "claude": Claude Code headless on a separate account (no local CPU); "local": llama-server above.
+BACKEND = os.environ.get("SM_AI_BACKEND", "local").strip()
+CLAUDE_TOKEN = os.environ.pop("SM_CLAUDE_OAUTH_TOKEN", "").strip()   # from `claude setup-token` on the OTHER account
+CLAUDE_DIR = os.path.expanduser(os.environ.get("SM_CLAUDE_CONFIG_DIR", "~/.claude-monitor"))
+CLAUDE_MODEL = os.environ.get("SM_CLAUDE_MODEL", "sonnet").strip()
+CLAUDE_BIN = os.environ.get("SM_CLAUDE_BIN") or __import__("shutil").which("claude") or os.path.expanduser("~/.local/bin/claude")
 BRIEFING_HOURS = float(os.environ.get("SM_AI_BRIEFING_HOURS", "6") or 0)
 TZ = ZoneInfo(os.environ.get("SM_TZ", "Asia/Seoul"))
 CONTEXT_TTL = 300            # reuse one snapshot for 5 min so llama-server can reuse its prompt cache
@@ -112,6 +118,57 @@ def kst(ts) -> str:
 
 def safe_path(p: str) -> str:
     return SAFE_PATH.sub("", p or "")[:60]
+
+
+class _Resp:
+    """Just enough of httpx.Response for the call sites (raise_for_status + json)."""
+    def __init__(self, data=None, error: str | None = None):
+        self._data, self._error = data, error
+
+    def raise_for_status(self):
+        if self._error:  # same exception type the llama path raises, so existing handlers apply
+            raise httpx.HTTPError(self._error)
+
+    def json(self):
+        return self._data
+
+
+async def claude_complete(payload: dict) -> dict:
+    """Run one headless Claude Code turn with NO tools/MCP/user config, on the separate account.
+    The model only ever sees text and returns text/JSON — it cannot execute anything here."""
+    msgs = payload["messages"]
+    system = "\n\n".join(m["content"] for m in msgs if m["role"] == "system")
+    convo = [m for m in msgs if m["role"] != "system"]
+    if len(convo) == 1:
+        prompt = convo[0]["content"]
+    else:
+        prompt = "\n\n".join(f"[{'관리자' if m['role'] == 'user' else 'AI'}]\n{m['content']}" for m in convo[:-1]) \
+            + "\n\n[관리자 — 지금 질문]\n" + convo[-1]["content"]
+    schema = ((payload.get("response_format") or {}).get("json_schema") or {}).get("schema")
+    args = [CLAUDE_BIN, "-p", "--safe-mode", "--tools", "", "--disallowedTools", "mcp__*",
+            "--no-session-persistence", "--output-format", "json", "--model", CLAUDE_MODEL, "--system-prompt", system]
+    if schema:
+        args += ["--json-schema", json.dumps(schema, ensure_ascii=False)]
+    # An inherited API key would silently be billed instead of the subscription: strip them.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_PROFILE")}
+    env.update(CLAUDE_CONFIG_DIR=CLAUDE_DIR, CLAUDE_CODE_OAUTH_TOKEN=CLAUDE_TOKEN)
+    os.makedirs(CLAUDE_DIR, mode=0o700, exist_ok=True)
+    proc = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                                                stderr=asyncio.subprocess.PIPE, env=env, cwd=CLAUDE_DIR)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(prompt.encode()), timeout=600)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError("claude -p timed out")
+    try:
+        data = json.loads(out)
+    except ValueError:
+        raise RuntimeError(f"claude -p failed ({proc.returncode}): {(err or out).decode()[:300]}")
+    if proc.returncode or data.get("is_error"):
+        raise RuntimeError(f"claude -p error: {str(data.get('result') or data)[:300]}")
+    content = json.dumps(data["structured_output"], ensure_ascii=False) if schema else data.get("result", "")
+    return {"choices": [{"message": {"content": content}}], "timings": {}}
 
 
 class Analyst:
@@ -357,6 +414,10 @@ class Analyst:
     # ------------------------------------------------------------ llm calls
 
     async def health(self) -> dict:
+        if BACKEND == "claude":
+            ok = bool(CLAUDE_TOKEN) and os.path.exists(CLAUDE_BIN)
+            return {"online": ok, "busy": self.busy, "tps": None, "briefing_hours": BRIEFING_HOURS,
+                    "model": f"Claude ({CLAUDE_MODEL}, 별도 계정)" if ok else "Claude — SM_CLAUDE_OAUTH_TOKEN 미설정"}
         try:
             r = await self.client.get("/health", timeout=3)
             ok = r.status_code == 200
@@ -364,6 +425,16 @@ class Analyst:
             ok = False
         return {"online": ok, "busy": self.busy, "tps": self.last_tps, "model": "Qwen3-4B-Instruct-2507 (Q4_K_M)",
                 "briefing_hours": BRIEFING_HOURS}
+
+    async def _chat(self, payload: dict):
+        """OpenAI-style chat completion from whichever backend is configured; returns an httpx-like response."""
+        if BACKEND != "claude":
+            return await self.client.post("/v1/chat/completions", json=payload)
+        try:
+            return _Resp(await claude_complete(payload))
+        except RuntimeError as e:
+            print("claude backend:", e, flush=True)
+            return _Resp(error=str(e))
 
     def validate_actions(self, actions: list, node_id: int | None = None) -> list:
         if node_id is None:
@@ -395,7 +466,7 @@ class Analyst:
                 facts = await asyncio.to_thread(self.context, node_id)
                 who = "이 서버" if node_id is None else f"원격 서버 '{self.node_fn(node_id)[0]['name']}'"
                 t0 = time.time()
-                r = await self.client.post("/v1/chat/completions", json={
+                r = await self._chat({
                     "messages": [
                         {"role": "system", "content": f"{SYSTEM_RULES}\n\n<data>\n{facts}\n</data>{self.memory_block()}"},
                         {"role": "user", "content":
@@ -472,6 +543,12 @@ class Analyst:
                 msgs.append({"role": "user", "content": q})
                 answer = ""
                 yield f"data: {json.dumps({'status': '생각 중…'}, ensure_ascii=False)}\n\n"
+                if BACKEND == "claude":  # fast enough to answer in one piece
+                    answer = (await claude_complete({"messages": msgs}))["choices"][0]["message"]["content"]
+                    yield f"data: {json.dumps({'t': answer}, ensure_ascii=False)}\n\n"
+                    await asyncio.to_thread(self.save_chat, session_id, ip, question, answer)
+                    yield f"data: {json.dumps({'done': True, 'past': len(past)})}\n\n"
+                    return
                 async with self.client.stream("POST", "/v1/chat/completions", json={
                         "messages": msgs, "stream": True, "temperature": 0.3, "max_tokens": 600,
                         "timings_per_token": False}) as r:
@@ -590,7 +667,7 @@ class Analyst:
             try:
                 stats = await asyncio.to_thread(self.daily_stats, start, end)
                 t0 = time.time()
-                r = await self.client.post("/v1/chat/completions", json={
+                r = await self._chat({
                     "messages": [
                         {"role": "system", "content": f"{SYSTEM_RULES}{self.memory_block()}"},
                         {"role": "user", "content":
@@ -781,7 +858,7 @@ class Analyst:
                 try:
                     facts = await asyncio.to_thread(self.context)
                     menu = [{"id": c["id"], "내용": c["desc"]} for c in cands if c["type"] in ("ban_ip", "block_host")]
-                    r = await self.client.post("/v1/chat/completions", json={
+                    r = await self._chat({
                         "messages": [
                             {"role": "system", "content": f"{SYSTEM_RULES}\n\n<data>\n{facts}\n</data>{self.memory_block()}"},
                             {"role": "user", "content":
