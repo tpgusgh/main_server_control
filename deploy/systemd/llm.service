@@ -10,14 +10,14 @@ Environment=LD_LIBRARY_PATH=%h/llm/lib:%h/llm/bin/llama-b11514
 ExecStart=%h/llm/bin/llama-b11514/llama-server \
   -m %h/llm/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf \
   --host 127.0.0.1 --port 8180 --api-key ${LLAMA_API_KEY} \
-  -t 4 -tb 4 -c 8192 -np 1 -ctk q8_0 -ctv q8_0 --cache-reuse 256 \
+  -t 2 -tb 2 -c 8192 -np 1 -ctk q8_0 -ctv q8_0 --cache-reuse 256 \
   --no-webui --jinja --reasoning off
 Restart=on-failure
 RestartSec=10
-# Keep the box responsive: low priority, at most 6 of 8 CPU threads, bounded memory.
+# Keep the box responsive: low priority, ~2 of 8 CPU threads (memory-bound: 2 threads are as fast as 4 on this CPU), bounded memory.
 Nice=15
 IOSchedulingClass=idle
-CPUQuota=600%
+CPUQuota=250%
 MemoryMax=4500M
 UMask=0077
 NoNewPrivileges=yes
