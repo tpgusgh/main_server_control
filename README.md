@@ -19,6 +19,8 @@ Cloudflare Tunnel + Access 뒤에서 동작하고, Tailscale로 묶인 여러 �
 | **접속 로그** | 대시보드 접속 IP·국가 6개월 보관, 원격 서버는 SSH 로그인 기록 |
 | **보안** | Cloudflare Access JWT 검증, 비밀번호 3회 실패 시 IP 영구 차단, 신뢰 IP, 세션 관리, SSH 무차별 대입 감지, 방화벽 자동 차단(sm-block) |
 | **AI 분석** | 서버별 브리핑·채팅(본체 LLM 사용), 매일 밤 서버별 일일 보고서(15분 간격), 30일 위험도 달력, 기억(가벼운 RAG), 대화 기록 |
+| **AI 활동 패널** | 지금 하는 작업과 경과 시간, Claude 5시간 세션·주간 사용률과 초기화 시각, 오늘 토큰 사용량, 다음 예정 작업(위험 감지·일일 보고서·보안 점검), 최근 작업별 토큰 |
+| **6시간 위험 감지** | 6시간마다 자동 브리핑, 위험도 주의 이상이면 디스코드로 "🛡️ AI 위험 감지" 알림 (`SM_AI_BRIEFING_HOURS`) |
 | **AI 보안 에이전트** | 주 1회(또는 버튼) 모든 서버 보안 점검 → 100점 점수 + 항목별 양호/주의/취약과 해결법 · 서비스 로그 "AI로 분석"(비밀번호·토큰 가린 뒤 전송) · 처음 보는 IP 로그인을 평소 패턴(국가·시간대·브라우저)과 비교해 수상할 때만 알림 |
 | **AI 자동 조치** | 빨간불이 켜지면 할 수 있는 건 처리(실패 서비스 재시작, 공격 IP 차단), 못 하는 것만 알림 |
 | **웹사이트 감시** | 등록한 주소를 2분마다 확인, 2번 연속 실패(무응답·5xx) 시 알림과 복구 알림, AI 위험도에 반영 |
@@ -147,7 +149,7 @@ ssh <user>@<원격_Tailscale_IP> 'bash ~/node_agent/install.sh <본체_Tailscale
 | `SM_DISCORD_BOT_TOKEN` + `SM_DISCORD_USER_ID`/`SM_DISCORD_CHANNEL_ID`, `SM_DISCORD_WEBHOOK`, `SM_TELEGRAM_*` | 알림 |
 | `SM_HEARTBEAT_URL` | 외부 하트비트(서버 다운 감지) |
 | `SM_LLM_URL` `SM_LLM_API_KEY` | 로컬 LLM |
-| `SM_AI_BRIEFING_HOURS` | 추가 정기 브리핑 간격(0 = 밤 일일 보고서만) |
+| `SM_AI_BRIEFING_HOURS` | 자동 위험 감지 간격(기본 6, 0 = 끔). 주의 이상이면 알림 |
 
 ---
 

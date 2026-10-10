@@ -175,6 +175,23 @@ class _Resp:
         return self._data
 
 
+CLAUDE_LIMITS: dict = {}  # latest subscription rate-limit info the CLI reported (5h session / 7 day windows)
+
+
+def _parse_stream(out: bytes) -> dict | None:
+    result = None
+    for line in out.decode(errors="replace").splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("type") == "rate_limit_event":
+            CLAUDE_LIMITS.update(d.get("rate_limit_info") or {}, checked=int(time.time()))
+        elif d.get("type") == "result":
+            result = d
+    return result
+
+
 async def claude_complete(payload: dict) -> dict:
     """Run one headless Claude Code turn with NO tools/MCP/user config, on the separate account.
     The model only ever sees text and returns text/JSON — it cannot execute anything here."""
@@ -188,7 +205,7 @@ async def claude_complete(payload: dict) -> dict:
             + "\n\n[관리자 — 지금 질문]\n" + convo[-1]["content"]
     schema = ((payload.get("response_format") or {}).get("json_schema") or {}).get("schema")
     args = [CLAUDE_BIN, "-p", "--safe-mode", "--tools", "", "--disallowedTools", "mcp__*",
-            "--no-session-persistence", "--output-format", "json", "--model", CLAUDE_MODEL, "--system-prompt", system]
+            "--no-session-persistence", "--output-format", "stream-json", "--verbose", "--model", CLAUDE_MODEL, "--system-prompt", system]
     if schema:
         args += ["--json-schema", json.dumps(schema, ensure_ascii=False)]
     # An inherited API key would silently be billed instead of the subscription: strip them.
@@ -203,14 +220,16 @@ async def claude_complete(payload: dict) -> dict:
     except asyncio.TimeoutError:
         proc.kill()
         raise RuntimeError("claude -p timed out")
-    try:
-        data = json.loads(out)
-    except ValueError:
-        raise RuntimeError(f"claude -p failed ({proc.returncode}): {(err or out).decode()[:300]}")
+    data = _parse_stream(out)
+    if data is None:
+        raise RuntimeError(f"claude -p failed ({proc.returncode}): {(err or out).decode()[-300:]}")
     if proc.returncode or data.get("is_error"):
         raise RuntimeError(f"claude -p error: {str(data.get('result') or data)[:300]}")
     content = json.dumps(data["structured_output"], ensure_ascii=False) if schema else data.get("result", "")
-    return {"choices": [{"message": {"content": content}}], "timings": {}}
+    u = data.get("usage") or {}
+    usage = {"in": sum(u.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")),
+             "out": u.get("output_tokens") or 0, "cost": data.get("total_cost_usd")}
+    return {"choices": [{"message": {"content": content}}], "timings": {}, "usage": usage}
 
 
 class Analyst:
@@ -225,11 +244,15 @@ class Analyst:
         self.status_fn, self.events_fn = status_fn, events_fn
         self.ip_labels, self.is_trusted, self.config_fn = ip_labels, is_trusted, config_fn
         self.lock = asyncio.Lock()
-        self.busy: str | None = None
+        self._busy: str | None = None
+        self.busy_since: float | None = None
         self.last_tps: float | None = None
         self._ctx: dict = {}  # node_id (None = this server) -> (built_at, facts json)
         self.client = httpx.AsyncClient(base_url=LLM_URL, timeout=httpx.Timeout(1800, connect=3),
                                         headers={"Authorization": f"Bearer {LLM_KEY}"} if LLM_KEY else {})
+        db("""CREATE TABLE IF NOT EXISTS ai_usage(
+              id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, task TEXT, tin INTEGER, tout INTEGER,
+              cost REAL, secs REAL, ok INTEGER)""")
         db("""CREATE TABLE IF NOT EXISTS ai_reports(
               id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, trigger TEXT, risk TEXT,
               content TEXT, duration REAL, tps REAL)""")
@@ -458,7 +481,7 @@ class Analyst:
     async def health(self) -> dict:
         if BACKEND == "claude":
             ok = bool(CLAUDE_TOKEN) and os.path.exists(CLAUDE_BIN)
-            return {"online": ok, "busy": self.busy, "tps": None, "briefing_hours": BRIEFING_HOURS,
+            return {"online": ok, "busy": self.busy, "busy_since": self.busy_since, "tps": None, "briefing_hours": BRIEFING_HOURS,
                     "model": f"Claude ({CLAUDE_MODEL}, 별도 계정)" if ok else "Claude — SM_CLAUDE_OAUTH_TOKEN 미설정"}
         try:
             r = await self.client.get("/health", timeout=3)
@@ -468,12 +491,51 @@ class Analyst:
         return {"online": ok, "busy": self.busy, "tps": self.last_tps, "model": "Qwen3-4B-Instruct-2507 (Q4_K_M)",
                 "briefing_hours": BRIEFING_HOURS}
 
+    @property
+    def busy(self) -> str | None:
+        return self._busy
+
+    @busy.setter
+    def busy(self, v: str | None):
+        self._busy, self.busy_since = v, (time.time() if v else None)
+
+    async def _claude(self, payload: dict) -> dict:
+        """claude_complete + a usage row (what ran, tokens, time) for the activity panel."""
+        t0, task = time.time(), self.busy or "질문 답변"
+        try:
+            r = await claude_complete(payload)
+        except Exception:
+            await asyncio.to_thread(self.db, "INSERT INTO ai_usage(ts,task,tin,tout,cost,secs,ok) VALUES(?,?,?,?,?,?,0)",
+                                    (int(t0), task, 0, 0, None, round(time.time() - t0, 1)))
+            raise
+        u = r["usage"]
+        await asyncio.to_thread(self.db, "INSERT INTO ai_usage(ts,task,tin,tout,cost,secs,ok) VALUES(?,?,?,?,?,?,1)",
+                                (int(t0), task, u["in"], u["out"], u["cost"], round(time.time() - t0, 1)))
+        return r
+
+    def usage_summary(self) -> dict:
+        now = int(time.time())
+        midnight = int(datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+        tot = lambda since: dict(self.db("SELECT COUNT(*) calls, COALESCE(SUM(tin),0) tin, COALESCE(SUM(tout),0) tout, "
+                                         "SUM(ok=0) fails FROM ai_usage WHERE ts>=?", (since,), one=True))
+        last = lambda trig: self.db("SELECT MAX(ts) t FROM ai_reports WHERE trigger=? AND node_id IS NULL",
+                                    (trig,), one=True)["t"]
+        reg = self.db("SELECT MAX(ts) t FROM ai_reports WHERE trigger NOT IN ('일일', '보안점검') AND node_id IS NULL",
+                      one=True)["t"]
+        self.db("DELETE FROM ai_usage WHERE ts < ?", (now - 30 * 86400,))
+        return {"today": tot(midnight), "week": tot(now - 7 * 86400),
+                "recent": [dict(r) for r in self.db("SELECT ts, task, tin, tout, secs, ok FROM ai_usage ORDER BY id DESC LIMIT 12")],
+                "limits": CLAUDE_LIMITS or None,
+                "next": {"regular": (reg or now) + int(BRIEFING_HOURS * 3600) if BRIEFING_HOURS > 0 else None,
+                         "daily": midnight + 86400,
+                         "audit": ((last("보안점검") or now) + AUDIT_EVERY)}}
+
     async def _chat(self, payload: dict):
         """OpenAI-style chat completion from whichever backend is configured; returns an httpx-like response."""
         if BACKEND != "claude":
             return await self.client.post("/v1/chat/completions", json=payload)
         try:
-            return _Resp(await claude_complete(payload))
+            return _Resp(await self._claude(payload))
         except RuntimeError as e:
             print("claude backend:", e, flush=True)
             return _Resp(error=str(e))
@@ -532,6 +594,13 @@ class Analyst:
                 self.db("INSERT INTO ai_reports(ts,trigger,risk,content,duration,tps,node_id,day) VALUES(?,?,?,?,?,?,?,?)",
                         (now, trigger, report.get("risk"), json.dumps(report, ensure_ascii=False),
                          round(dur, 1), self.last_tps, node_id, day))
+                if not day and node_id is None and trigger != "수동" and report.get("risk") in ("medium", "high") \
+                        and "alert" in self.fixers:
+                    lvl = "위험" if report["risk"] == "high" else "주의"
+                    top = "; ".join(f["title"] for f in report.get("findings", [])[:3])
+                    await asyncio.to_thread(self.fixers["alert"], "ai_risk", "", "",
+                                            f"[{trigger} 점검] 위험도 {lvl} — {report['summary'][:250]}" +
+                                            (f"\n주요 항목: {top[:200]}" if top else ""), 0, True)
                 if day and node_id is not None:  # nightly report of a remote server: same card as the main one
                     name = report.get("server", "")
                     risk_kr = {"low": "낮음 ✅", "medium": "주의 ⚠️", "high": "위험 ⛔"}.get(report["risk"], report["risk"])
@@ -586,7 +655,7 @@ class Analyst:
                 answer = ""
                 yield f"data: {json.dumps({'status': '생각 중…'}, ensure_ascii=False)}\n\n"
                 if BACKEND == "claude":  # fast enough to answer in one piece
-                    answer = (await claude_complete({"messages": msgs}))["choices"][0]["message"]["content"]
+                    answer = (await self._claude({"messages": msgs}))["choices"][0]["message"]["content"]
                     yield f"data: {json.dumps({'t': answer}, ensure_ascii=False)}\n\n"
                     await asyncio.to_thread(self.save_chat, session_id, ip, question, answer)
                     yield f"data: {json.dumps({'done': True, 'past': len(past)})}\n\n"
@@ -629,7 +698,8 @@ class Analyst:
                       (start, end), one=True)["c"]
         down = self.db("SELECT COUNT(*) c FROM alerts WHERE kind='node_down' AND ts>=? AND ts<?", (start, end), one=True)["c"]
         failed_units = [s["unit"] for s in self.services_fn() if s["active"] == "failed" and s["unit"] not in IGNORE_FAILED]
-        failed_units += [f"{n['이름']}:{f['unit']}" for n in self.nodes_fn() for f in (n.get("문제서비스") or [])]
+        failed_units += [f"{n['이름']}:{f['unit']}" for n in self.nodes_fn() for f in (n.get("문제서비스") or [])
+                         if f["unit"] not in IGNORE_FAILED]
         down_sites = [s["이름"] for s in self.sites_fn() if s["정상"] is False]
         if down_sites:
             level = "medium"; reasons.append("접속 불가 웹사이트: " + ", ".join(down_sites))

@@ -57,7 +57,7 @@ const fmtAgo = (ts) => {
 };
 const fmtDur = (sec) => {
   const d = Math.floor(sec / 86400), hh = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
-  return d ? `${d}일 ${hh}시간` : hh ? `${hh}시간 ${m}분` : `${m}분`;
+  return d ? `${d}일 ${hh}시간` : hh ? `${hh}시간 ${m}분` : m ? `${m}분` : `${Math.max(0, Math.round(sec))}초`;
 };
 const ipCell = (r, text) => h("td", { class: "mono" }, text || r.ip,
   r.label ? h("span", { class: "pill me" }, r.label) : null,
@@ -472,7 +472,9 @@ $("nextPage").addEventListener("click", () => { accessPage++; loadAccess(); });
 // ---------------------------------------------------------------- security
 
 const ALERT_KIND = { new_ip: ["새 IP 로그인", "warn"], login_fail: ["로그인 실패", "crit"], ban: ["영구 차단", "crit"], unban: ["차단 해제", "good"],
-  ai_fix: ["AI 자동 조치", "good"], needs_you: ["직접 확인 필요", "crit"], node_down: ["서버 끊김", "crit"], node_up: ["서버 복구", "good"], node_hot: ["원격 고부하", "warn"] };
+  ai_fix: ["AI 자동 조치", "good"], needs_you: ["직접 확인 필요", "crit"], node_down: ["서버 끊김", "crit"], node_up: ["서버 복구", "good"], node_hot: ["원격 고부하", "warn"],
+  power: ["전원 조작", "warn"], site_down: ["사이트 다운", "crit"], site_up: ["사이트 복구", "good"],
+  login_risk: ["수상한 로그인", "crit"], ai_risk: ["AI 위험 감지", "warn"] };
 
 async function unbanIp(b) {
   if (!(await confirmDialog("차단 해제", `${b.key} 의 영구 차단을 풀까요? 실패 횟수도 0으로 초기화됩니다.`, false))) return;
@@ -731,8 +733,8 @@ async function openReport(id) {
 function reportCard(r) {
   return [riskBanner(r.risk, r.rule_reasons && r.rule_reasons.length ? `근거: ${r.rule_reasons.join(" · ")}` : null),
     h("p", { class: "brief-summary" }, ...md(r.summary)),
-    h("button", { class: "btn", onclick: () => openReport(r.id) }, "보고서 자세히 보기"),
-    h("p", { class: "muted ai-note" }, "ⓘ 수치·위험도는 규칙 기반, 설명은 AI 참고용")];
+    h("div", { class: "card-foot" }, h("button", { class: "btn", onclick: () => openReport(r.id) }, "보고서 자세히 보기"),
+      h("span", { class: "muted" }, "수치·위험도는 규칙 기반, 설명은 AI 참고용"))];
 }
 
 let dailyKey = "";
@@ -751,8 +753,97 @@ function renderRiskCalendar(daily) {
   $("riskCal").replaceChildren(...cells);
 }
 
+const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n || 0}`);
+const fmtWhen = (ts) => {
+  const d = new Date(ts * 1000), today = new Date();
+  const sameDay = d.toDateString() === today.toDateString();
+  return sameDay ? fmtTime(ts) : `${d.getMonth() + 1}/${d.getDate()} ${fmtTime(ts)}`;
+};
+
+// CSP forbids style="" attributes; CSSOM property writes are allowed.
+const withStyle = (el, prop, value) => { el.style.setProperty(prop, String(value)); return el; };
+
+let aiBusy = null;  // { label, since (server epoch), offset (server - client seconds) }
+function renderAiNow(st) {
+  const busy = st.busy;
+  aiBusy = busy ? { label: busy, since: st.busy_since, offset: (st.server_now || Date.now() / 1000) - Date.now() / 1000 } : null;
+  put($("aiNow"),
+    h("span", { class: `ai-dot ${!st.online ? "off" : busy ? "busy" : "idle"}`, "aria-hidden": "true" }),
+    h("div", {},
+      h("div", { class: "ai-now-title" }, !st.online ? "AI 꺼짐" : busy ? busy : "대기 중"),
+      h("div", { class: "muted" }, busy ? h("span", { id: "aiElapsed", class: "num" }, "") : null,
+        busy ? " · " : null, st.model)));
+  tickAiElapsed();
+}
+function tickAiElapsed() {
+  const el = document.getElementById("aiElapsed");
+  if (el && aiBusy && aiBusy.since) {
+    const t = Math.max(0, Math.round(Date.now() / 1000 + aiBusy.offset - aiBusy.since));
+    el.textContent = `${t >= 60 ? `${Math.floor(t / 60)}분 ` : ""}${t % 60}초째 진행 중`;
+  }
+}
+setInterval(() => { if (activeTab === "ai") tickAiElapsed(); }, 1000);
+
+function gauge(title, pct, sub) {
+  const cls = pct == null ? "" : pct >= 90 ? "crit" : pct >= 70 ? "warn" : "";
+  return h("div", { class: "gauge" },
+    h("div", { class: "gauge-k" }, h("span", {}, title), h("b", { class: "num" }, pct == null ? "–" : `${pct}%`)),
+    h("div", { class: "meter" }, withStyle(h("i", { class: cls }), "width", `${Math.min(100, pct || 0)}%`)),
+    h("div", { class: "muted gauge-sub" }, sub));
+}
+
+const jobName = (t) => t.replace(/\s*(생성|작성|판단|답하는)?\s*중$/, "").replace(/질문에$/, "질문 답변");
+
+function renderAiUsage(st) {
+  const u = st.usage, now = (st.server_now || Date.now() / 1000);
+  if (!u) { put($("aiGauges"), h("p", { class: "muted" }, "사용량은 Claude 백엔드에서만 표시됩니다.")); put($("aiSched")); return; }
+  const w = (u.limits && u.limits.unifiedWindows) || {};
+  const win = (x) => (x && x.utilization != null ? Math.round(x.utilization * 100) : null);
+  const resets = (x) => (x && x.resetsAt ? `${fmtWhen(x.resetsAt)} 초기화 · ${fmtDur(x.resetsAt - now)} 남음` : "AI가 한 번 실행되면 표시");
+  const t = u.today;
+  put($("aiGauges"),
+    gauge("5시간 세션 사용량", win(w.five_hour), resets(w.five_hour)),
+    gauge("주간 사용량 (7일)", win(w.seven_day), resets(w.seven_day)),
+    h("div", { class: "gauge" },
+      h("div", { class: "gauge-k" }, h("span", {}, "오늘 사용"), h("b", { class: "num" }, `${t.calls}회`)),
+      h("div", { class: "tok-line num" }, `입력 ${fmtTok(t.tin)} · 출력 ${fmtTok(t.tout)} 토큰`),
+      h("div", { class: "muted gauge-sub" }, `최근 7일 ${u.week.calls}회 · ${fmtTok(u.week.tin + u.week.tout)} 토큰` +
+        (t.fails ? ` · 오늘 실패 ${t.fails}회` : ""))));
+  const n = u.next || {};
+  const chip = (label, ts) => ts ? h("span", { class: "sched-chip" }, h("span", { class: "muted" }, label),
+    h("b", { class: "num" }, ts <= now ? "곧" : fmtWhen(ts))) : null;
+  put($("aiSched"), h("span", { class: "muted" }, "다음 예정"),
+    chip(`위험 감지 (${st.briefing_hours}시간마다)`, n.regular), chip("일일 보고서", n.daily), chip("보안 점검 (매주)", n.audit),
+    u.limits && u.limits.checked ? h("span", { class: "muted sched-note" }, `사용량 기준 ${fmtWhen(u.limits.checked)}`) : null);
+  fill($("aiJobs"), u.recent.map((r) => h("tr", {},
+    h("td", { class: "num" }, fmtWhen(r.ts)),
+    h("td", {}, r.ok ? jobName(r.task) : h("span", { class: "pill crit" }, `${jobName(r.task)} · 실패`)),
+    h("td", { class: "r num" }, r.ok ? `${fmtTok(r.tin)} / ${fmtTok(r.tout)}` : "–"),
+    h("td", { class: "r num" }, `${Math.round(r.secs)}초`))), 4, "아직 작업 기록이 없습니다");
+}
+
+function auditCard(a) {
+  if (!a) return h("p", { class: "muted" }, "아직 점검 기록이 없습니다. ‘보안 점검’을 누르면 1~2분 뒤 결과가 나옵니다.");
+  const cls = a.score >= 80 ? "good" : a.score >= 50 ? "warn" : "crit";
+  return [h("div", { class: "score-row" },
+      withStyle(h("div", { class: `score-ring ${cls}` }, h("b", { class: "num" }, a.score ?? "–"), h("small", {}, "/100")), "--p", a.score ?? 0),
+      h("div", {}, h("div", { class: "muted" }, `${fmtDateTime(a.ts)} 점검`), h("p", { class: "brief-summary" }, ...md(a.summary)))),
+    h("button", { class: "btn", onclick: () => openReport(a.id) }, "점검표 자세히 보기")];
+}
+
+let aiView = "now";
+$("aiSeg").addEventListener("click", (e) => {
+  const v = e.target.closest("button[data-v]");
+  if (!v) return;
+  aiView = v.dataset.v;
+  for (const b of $("aiSeg").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b === v));
+  for (const el of document.querySelectorAll("[data-aiview]")) el.classList.toggle("hidden", el.dataset.aiview !== aiView);
+});
+
 async function loadAi() {
   const st = await api(`/api/ai/status${currentNode != null ? `?node=${currentNode}` : ""}`);
+  renderAiNow(st);
+  renderAiUsage(st);
   const key = JSON.stringify(st.daily.map((d) => [d.id, d.risk]));
   if (key !== dailyKey) {
     dailyKey = key;
@@ -761,28 +852,21 @@ async function loadAi() {
     put($("dailyView"), last ? [h("div", { class: "daily-head" }, h("h3", {}, `${last.day} 보고서`)), ...reportCard(last)]
       : h("p", { class: "muted" }, "아직 일일 보고서가 없습니다. 오늘 밤 12시에 첫 보고서가 작성됩니다."));
   }
-  put($("aiStatus"),
-    h("span", { class: `pill ${st.online ? "good" : "crit"}` }, st.online ? "AI 온라인" : "AI 꺼짐"),
-    h("span", {}, st.model),
-    st.busy ? h("span", { class: "pill warn" }, st.busy) : null,
-    st.tps ? h("span", { class: "muted" }, `최근 속도 ${st.tps.toFixed(1)} 토큰/초`) : null,
-    h("span", { class: "muted" }, `자동 보고서: 매일 00:00부터 서버마다 15분 간격${st.briefing_hours > 0 ? ` · 정기 브리핑 ${st.briefing_hours}시간마다` : ""} · 차단/고부하 시 즉시`),
-    st.online ? null : h("span", { class: "muted" }, "서비스 탭에서 llm.service 를 켜세요"));
-  $("briefBtn").disabled = !st.online || !!st.busy;
-  $("briefBtn").textContent = st.busy === "브리핑 생성 중" ? "분석 중… (2~4분)" : "지금 분석";
+  const busy = !st.online || !!st.busy;
+  $("briefBtn").disabled = busy;
+  $("briefBtn").textContent = st.busy === "브리핑 생성 중" ? "분석 중…" : "지금 분석";
+  $("auditBtn").disabled = busy;
+  $("auditBtn").textContent = st.busy === "보안 점검 중" ? "점검 중…" : "보안 점검";
   const au = st.audits || [];
-  $("auditBtn").disabled = !st.online || !!st.busy;
-  $("auditBtn").textContent = st.busy === "보안 점검 중" ? "점검 중…" : "지금 점검";
-  put($("auditView"), au.length ? [h("div", { class: "audit-hist" }, au.map((a) => h("button", { class: "btn", onclick: () => openReport(a.id) },
-      h("b", { class: "num" }, `${a.score ?? "–"}점`), ` ${fmtDateTime(a.ts)}`))),
-    h("p", { class: "brief-summary" }, ...md(au[0].summary)),
-    h("button", { class: "btn", onclick: () => openReport(au[0].id) }, "점검표 자세히 보기")]
-    : h("p", { class: "muted" }, "아직 점검 기록이 없습니다. ‘지금 점검’을 누르면 1~2분 뒤 결과가 나옵니다."));
+  put($("auditView"), auditCard(au[0]));
+  fill($("auditRows"), au.map((a) => h("tr", { class: "clickable", onclick: () => openReport(a.id) },
+    h("td", { class: "num" }, fmtDateTime(a.ts)), h("td", { class: "r num" }, `${a.score ?? "–"}점`),
+    h("td", { class: "ellipsis" }, a.summary))), 3, "기록이 없습니다");
   const latest = st.reports[0];
   if (!latest || aiShownReport !== latest.id) {
     aiShownReport = latest ? latest.id : null;
-    $("briefMeta").textContent = latest ? `${fmtDateTime(latest.ts)} · ${latest.trigger} · ${latest.duration}초` : "";
-    put($("briefing"), latest ? reportCard(latest) : h("p", { class: "muted" }, "아직 브리핑이 없습니다. ‘지금 분석’을 누르면 2~4분 뒤 결과가 나옵니다."));
+    $("briefMeta").textContent = latest ? `${fmtWhen(latest.ts)} · ${latest.trigger}` : "";
+    put($("briefing"), latest ? reportCard(latest) : h("p", { class: "muted" }, "아직 브리핑이 없습니다. ‘지금 분석’을 누르면 1~2분 뒤 결과가 나옵니다."));
   }
   fill($("reports"), st.reports.map((r) => h("tr", { class: "clickable", onclick: () => openReport(r.id) },
     h("td", { class: "num" }, fmtDateTime(r.ts)), h("td", {}, r.trigger), h("td", {}, riskPill(r.risk)),

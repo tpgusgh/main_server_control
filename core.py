@@ -190,11 +190,11 @@ ALERT_TITLES = {"new_ip": "🔔 새 IP 로그인", "login_fail": "⚠️ 로그�
                 "unban": "✅ IP 차단 해제", "node_down": "🔴 서버 연결 끊김", "node_up": "🟢 서버 다시 연결",
                 "node_hot": "🔥 원격 서버 고부하", "ai_fix": "🤖 AI 자동 조치", "needs_you": "🚨 직접 확인 필요",
                 "power": "⚡ 서버 전원 조작", "site_down": "🌐 웹사이트 접속 불가", "site_up": "🌐 웹사이트 복구",
-                "login_risk": "🕵️ AI: 수상한 로그인"}
+                "login_risk": "🕵️ AI: 수상한 로그인", "ai_risk": "🛡️ AI 위험 감지"}
 ALERT_LEVEL = {"ban": "critical", "login_fail": "critical", "node_down": "critical", "needs_you": "critical",
                "new_ip": "warning", "node_hot": "warning", "power": "warning",
                "unban": "good", "node_up": "good", "ai_fix": "good", "site_down": "critical", "site_up": "good",
-               "login_risk": "critical"}
+               "login_risk": "critical", "ai_risk": "warning"}
 
 def raise_alert(kind: str, ip: str, country: str, message: str, throttle: int = 0, push: bool = True):
     """Store an alert for the dashboard and push it to Telegram/Discord (if configured)."""

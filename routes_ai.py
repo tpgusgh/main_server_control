@@ -196,7 +196,8 @@ async def ai_status(request: Request, node: int | None = None):
                   "WHERE trigger = '보안점검' ORDER BY id DESC LIMIT 12")
     for a, r in zip(audits, db("SELECT content FROM ai_reports WHERE trigger = '보안점검' ORDER BY id DESC LIMIT 12")):
         a["score"] = json.loads(r["content"]).get("score")
-    return {**health, "reports": reports, "daily": daily, "audits": audits}
+    return {**health, "reports": reports, "daily": daily, "audits": audits, "server_now": time.time(),
+            "usage": await asyncio.to_thread(analyst.usage_summary) if agent.BACKEND == "claude" else None}
 
 
 @router.get("/api/ai/report/{rid}")

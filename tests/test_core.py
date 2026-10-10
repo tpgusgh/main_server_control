@@ -316,7 +316,11 @@ class ClaudeBackend(unittest.TestCase):
 
             async def communicate(self, data):
                 captured["stdin"] = data.decode()
-                return _json.dumps({"is_error": False, "result": "", "structured_output": {"risk": "low"}}).encode(), b""
+                lines = [{"type": "system", "subtype": "init"},
+                         {"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": {"five_hour": {"utilization": 0.25}}}},
+                         {"type": "result", "is_error": False, "result": "", "structured_output": {"risk": "low"},
+                          "usage": {"input_tokens": 3, "cache_read_input_tokens": 7, "output_tokens": 5}}]
+                return ("\n".join(map(_json.dumps, lines)) + "\n").encode(), b""
 
         async def fake_exec(*args, **kw):
             captured["args"], captured["env"] = args, kw["env"]
@@ -339,6 +343,8 @@ class ClaudeBackend(unittest.TestCase):
         self.assertNotIn("ANTHROPIC_API_KEY", captured["env"], "never bill an API key by accident")
         self.assertEqual(_json.loads(out["choices"][0]["message"]["content"]), {"risk": "low"})
         self.assertEqual(captured["stdin"], "q")
+        self.assertEqual(out["usage"]["in"], 10)
+        self.assertEqual(agent.CLAUDE_LIMITS["unifiedWindows"]["five_hour"]["utilization"], 0.25)
 
 
 class SecurityAgent(unittest.TestCase):

@@ -218,25 +218,57 @@
 
   <!-- ============ AI 분석 ============ -->
   <section data-panel="ai" class="hidden">
-    <div class="card ai-status" id="aiStatus"></div>
-
-    <div class="section-title"><h2>일일 보고서</h2><span class="sub">매일 밤 12시(KST)부터 서버마다 15분 간격으로 AI가 전날 보고서 작성 · 30일 보관</span></div>
-    <div class="card">
-      <div class="risk-cal-head"><span class="muted">최근 30일 위험도</span>
-        <span class="legend"><i class="lv lv-low"></i>낮음 <i class="lv lv-medium"></i>주의 <i class="lv lv-high"></i>위험 <i class="lv lv-none"></i>보고서 없음</span></div>
-      <div class="risk-cal" id="riskCal" role="list"></div>
-      <div id="dailyView"></div>
+    <div class="card ai-hero">
+      <div class="ai-hero-top">
+        <div class="ai-now" id="aiNow" aria-live="polite"></div>
+        <div class="ai-hero-btns">
+          <button class="btn" id="auditBtn">보안 점검</button>
+          <button class="btn primary" id="briefBtn">지금 분석</button>
+        </div>
+      </div>
+      <div class="ai-gauges" id="aiGauges"></div>
+      <div class="ai-sched" id="aiSched"></div>
     </div>
 
-    <div class="section-title"><h2>보안 점검</h2><span class="sub">모든 서버의 SSH·방화벽·업데이트·노출 포트 등을 AI가 100점 만점으로 평가 · 매주 자동</span>
-      <div class="right"><button class="btn" id="auditBtn">지금 점검</button></div></div>
-    <div class="card" id="auditView"></div>
+    <div class="seg ai-seg" id="aiSeg">
+      <button type="button" data-v="now" aria-pressed="true">현황</button>
+      <button type="button" data-v="chat">AI에게 질문</button>
+      <button type="button" data-v="log">기록</button>
+    </div>
 
-    <div class="section-title"><h2>보안 · 운영 브리핑</h2><span class="sub" id="briefMeta"></span>
-      <div class="right"><button class="btn primary" id="briefBtn">지금 분석</button></div></div>
-    <div class="card" id="briefing"></div>
+    <div data-aiview="now">
+      <div class="grid two">
+        <div class="ai-col">
+          <div class="section-title"><h2>최근 위험 감지</h2><span class="sub" id="briefMeta"></span></div>
+          <div class="card grow" id="briefing"></div>
+        </div>
+        <div class="ai-col">
+          <div class="section-title"><h2>보안 점검</h2><span class="sub">모든 서버 · 매주 자동</span></div>
+          <div class="card grow" id="auditView"></div>
+        </div>
+      </div>
+      <div class="grid two">
+        <div class="ai-col">
+          <div class="section-title"><h2>일일 보고서</h2><span class="sub">매일 00:00부터 서버마다 15분 간격 · 30일 보관</span></div>
+          <div class="card grow">
+            <div class="risk-cal-head"><span class="muted">최근 30일 위험도</span>
+              <span class="legend"><i class="lv lv-low"></i>낮음 <i class="lv lv-medium"></i>주의 <i class="lv lv-high"></i>위험 <i class="lv lv-none"></i>없음</span></div>
+            <div class="risk-cal" id="riskCal" role="list"></div>
+            <div id="dailyView"></div>
+          </div>
+        </div>
+        <div class="ai-col">
+          <div class="section-title"><h2>최근 AI 작업</h2><span class="sub">무엇을 했고 토큰을 얼마나 썼는지</span></div>
+          <div class="card grow table-wrap"><table class="compact">
+            <thead><tr><th>시각</th><th>작업</th><th class="r">토큰 (입력/출력)</th><th class="r">소요</th></tr></thead>
+            <tbody id="aiJobs"></tbody>
+          </table></div>
+        </div>
+      </div>
+    </div>
 
-    <div class="section-title"><h2>AI에게 질문</h2><span class="sub">서버가 집계한 최근 24시간 데이터로 답합니다 · AI는 아무것도 실행하지 않습니다</span></div>
+    <div data-aiview="chat" class="hidden">
+      <div class="section-title"><h2>AI에게 질문</h2><span class="sub">서버가 집계한 최근 24시간 데이터로 답합니다 · AI는 아무것도 실행하지 않습니다</span></div>
     <div class="card chat">
       <div class="chat-log" id="chatLog" aria-live="polite"></div>
       <div class="chat-suggest" id="chatSuggest">
@@ -269,11 +301,20 @@
       </div>
     </div>
 
-    <div class="section-title"><h2>지난 브리핑</h2><span class="sub">30일 보관</span></div>
-    <div class="card table-wrap"><table>
-      <thead><tr><th>시각</th><th>계기</th><th>위험도</th><th>요약</th><th class="r">소요</th></tr></thead>
-      <tbody id="reports"></tbody>
-    </table></div>
+    </div>
+
+    <div data-aiview="log" class="hidden">
+      <div class="section-title"><h2>지난 브리핑</h2><span class="sub">30일 보관 · 6시간마다 자동, 위험하면 디스코드 알림</span></div>
+      <div class="card table-wrap"><table>
+        <thead><tr><th>시각</th><th>계기</th><th>위험도</th><th>요약</th><th class="r">소요</th></tr></thead>
+        <tbody id="reports"></tbody>
+      </table></div>
+      <div class="section-title"><h2>지난 보안 점검</h2></div>
+      <div class="card table-wrap"><table>
+        <thead><tr><th>시각</th><th class="r">점수</th><th>요약</th></tr></thead>
+        <tbody id="auditRows"></tbody>
+      </table></div>
+    </div>
   </section>
 
   <!-- ============ 접속 로그 ============ -->
@@ -364,7 +405,7 @@
     </table></div>
 
     <div class="section-title"><h2>보안 알림</h2><span class="sub" id="alertChannels"></span></div>
-    <div class="card table-wrap"><table>
+    <div class="card table-wrap scroll-y"><table>
       <thead><tr><th>시각</th><th>종류</th><th>IP</th><th>국가</th><th>내용</th></tr></thead>
       <tbody id="alerts"></tbody>
     </table></div>
