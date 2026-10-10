@@ -162,8 +162,10 @@ class Analyst:
         st = self.status_fn()
         n = st["now"]
         hourly = self.db(
-            "SELECT (ts/3600)*3600 h, ROUND(AVG(cpu),1) c, ROUND(MAX(cpu),1) cm, ROUND(AVG(mem),1) m, "
-            "ROUND(MAX(temp),0) t FROM metrics WHERE ts>=? GROUP BY h ORDER BY h", (day,))
+            "SELECT (ts/10800)*10800 h, ROUND(AVG(cpu)) c, ROUND(MAX(cpu)) cm, ROUND(AVG(mem)) m, "
+            "ROUND(MAX(temp)) t FROM metrics WHERE ts>=? GROUP BY h ORDER BY h", (day,))  # 3h blocks: prompt size = speed here
+        peak = lambda col: self.db(f"SELECT ts, ROUND({col}) v FROM metrics WHERE ts>=? AND {col} IS NOT NULL "
+                                   f"ORDER BY {col} DESC LIMIT 1", (day,), one=True)
         auth = self.db(
             "SELECT SUM(event='login_ok') ok, SUM(event='login_fail') fail, SUM(event='banned') banned_hits, "
             "SUM(event='denied') denied, SUM(event='anon') anon FROM access_log WHERE ts>=?", (day,), one=True)
@@ -180,10 +182,11 @@ class Analyst:
             "GROUP BY ip ORDER BY n DESC LIMIT 8", (day,))
         anon_paths = self.db(
             "SELECT path, COUNT(*) n, COUNT(DISTINCT ip) ips, MAX(ip) ip FROM access_log "
-            "WHERE event IN ('anon','denied') AND ts>=? GROUP BY path ORDER BY n DESC LIMIT 8", (day,))
-        alerts = self.db("SELECT ts, kind, ip FROM alerts WHERE ts>=? ORDER BY id DESC LIMIT 15", (day,))
+            "WHERE event IN ('anon','denied') AND ts>=? GROUP BY path ORDER BY n DESC LIMIT 5", (day,))
+        alerts = self.db("SELECT ts, kind, ip FROM alerts WHERE ts>=? ORDER BY id DESC LIMIT 5", (day,))
+        alert_counts = {r["kind"]: r["n"] for r in self.db("SELECT kind, COUNT(*) n FROM alerts WHERE ts>=? GROUP BY kind", (day,))}
         actions = self.db("SELECT ts, detail FROM access_log WHERE event='action' AND status=200 AND ts>=? "
-                          "ORDER BY id DESC LIMIT 10", (day,))
+                          "ORDER BY id DESC LIMIT 5", (day,))
         sessions = self.db("SELECT COUNT(*) c FROM sessions", one=True)["c"]
         ev = self.events_fn()
         cfg = self.config_fn()
@@ -202,8 +205,10 @@ class Analyst:
                    "코어": st["cpu_count"]},
             "현재": {"cpu%": n["cpu"], "mem%": n["mem"], "temp_c": n["temp"], "load1": round(n["load"][0], 2),
                    "disk%": n["disk"], "swap%": n["swap"]},
-            "최근24시간_시간별[시각,cpu평균,cpu최대,mem평균,온도최대]":
-                [[kst(r["h"]), r["c"], r["cm"], r["m"], r["t"]] for r in hourly],
+            "최근24시간_3시간별[시작,cpu평균,cpu최대,mem평균,온도최대]":
+                [[kst(r["h"])[6:], r["c"], r["cm"], r["m"], r["t"]] for r in hourly],
+            "24시간최고": {k: f"{p['v']} ({kst(p['ts'])[6:]})" for k, p in
+                       (("cpu%", peak("cpu")), ("mem%", peak("mem")), ("temp_c", peak("temp"))) if p},
             "고부하구간": [{"시작": kst(e["start"]), "끝": kst(e["end"]), "원인": e["reasons"],
                        "cpu최대": round(e["cpu_max"]), "온도최대": round(e["temp_max"])} for e in ev["events"][:8]],
             "상위프로세스": [{"name": p["name"], "cpu%": p["cpu"], "mem%": p["mem"]} for p in st["top"][:6]],
@@ -218,7 +223,8 @@ class Analyst:
             "비인증요청_상위IP_24시간": [dict(ipinfo(r["ip"], r["c"]), 요청=r["n"]) for r in anon_ips],
             "비인증요청_상위경로_24시간": [{"path": safe_path(r["path"]), "요청": r["n"], "요청한IP수": r["ips"],
                                   "요청한IP예시": r["ip"]} for r in anon_paths],
-            "보안알림_24시간": [{"시각": kst(a["ts"]), "종류": a["kind"], "ip": a["ip"]} for a in alerts],
+            "보안알림_24시간": {"종류별개수": alert_counts,
+                           "최근5개": [[kst(a["ts"])[6:], a["kind"], a["ip"] or "-"] for a in alerts]},
             "관리자작업_24시간": [{"시각": kst(a["ts"]), "작업": safe_path(a["detail"].replace(" ", "_"))} for a in actions],
             "활성세션수": sessions,
             "다른서버(Tailscale)": self.nodes_fn(),

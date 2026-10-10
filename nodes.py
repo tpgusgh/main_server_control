@@ -202,7 +202,7 @@ class NodeHub:
                         "현재": {"cpu%": cur.get("cpu"), "mem%": cur.get("mem"), "temp_c": cur.get("temp"),
                                "disk%": cur.get("disk")} if st.get("online") else None,
                         "기간통계": self.window_stats(n["id"], start, end),
-                        "실행중서비스": [s["unit"] for s in svcs if s.get("active") == "active"][:40],
+                        "실행중서비스수": sum(1 for s in svcs if s.get("active") == "active"),  # full list only in that server's view
                         "문제서비스": [{"unit": s["unit"], "제어가능": s.get("controllable", True)}
                                   for s in svcs if s.get("active") == "failed"],
                         "외부노출포트": [{"port": p["port"], "process": p.get("process")}
