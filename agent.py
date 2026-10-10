@@ -81,16 +81,16 @@ BRIEFING_SCHEMA = {
     "type": "object",
     "properties": {
         "risk": {"type": "string", "enum": ["low", "medium", "high"]},
-        "summary": {"type": "string", "maxLength": 500},
-        "findings": {"type": "array", "maxItems": 5, "items": {
+        "summary": {"type": "string", "maxLength": 300},
+        "findings": {"type": "array", "maxItems": 3, "items": {
             "type": "object",
             "properties": {"severity": {"type": "string", "enum": ["info", "warn", "critical"]},
-                           "title": {"type": "string", "maxLength": 60}, "detail": {"type": "string", "maxLength": 220}},
+                           "title": {"type": "string", "maxLength": 50}, "detail": {"type": "string", "maxLength": 150}},
             "required": ["severity", "title", "detail"]}},
-        "actions": {"type": "array", "maxItems": 4, "items": {
+        "actions": {"type": "array", "maxItems": 3, "items": {
             "type": "object",
             "properties": {"type": {"type": "string", "enum": list(ACTION_TYPES)},
-                           "target": {"type": "string", "maxLength": 60}, "reason": {"type": "string", "maxLength": 160}},
+                           "target": {"type": "string", "maxLength": 60}, "reason": {"type": "string", "maxLength": 100}},
             "required": ["type", "target", "reason"]}},
     },
     "required": ["risk", "summary", "findings", "actions"],
@@ -121,6 +121,7 @@ class Analyst:
         self.node_ids_fn, self.sites_fn = node_ids_fn, sites_fn
         self.nodes_fn, self.local_name_fn, self.fixers, self.node_fn = nodes_fn, local_name_fn, fixers or {}, node_fn
         self._handled: dict[str, int] = {}
+        self._backoff: dict[tuple, float] = {}  # failed job -> don't retry before this time
         self.db, self.services_fn, self.units_fn = db, services_fn, units_fn
         self.status_fn, self.events_fn = status_fn, events_fn
         self.ip_labels, self.is_trusted, self.config_fn = ip_labels, is_trusted, config_fn
@@ -128,7 +129,7 @@ class Analyst:
         self.busy: str | None = None
         self.last_tps: float | None = None
         self._ctx: dict = {}  # node_id (None = this server) -> (built_at, facts json)
-        self.client = httpx.AsyncClient(base_url=LLM_URL, timeout=httpx.Timeout(600, connect=3),
+        self.client = httpx.AsyncClient(base_url=LLM_URL, timeout=httpx.Timeout(1800, connect=3),
                                         headers={"Authorization": f"Bearer {LLM_KEY}"} if LLM_KEY else {})
         db("""CREATE TABLE IF NOT EXISTS ai_reports(
               id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, trigger TEXT, risk TEXT,
@@ -392,10 +393,10 @@ class Analyst:
                     "messages": [
                         {"role": "system", "content": f"{SYSTEM_RULES}\n\n<data>\n{facts}\n</data>{self.memory_block()}"},
                         {"role": "user", "content":
-                            f"위 데이터로 {who}의 최근 24시간 보안·운영 브리핑을 작성해. summary는 2~3문장. "
+                            f"위 데이터로 {who}의 최근 24시간 보안·운영 브리핑을 작성해. summary는 2문장. findings는 최대 3개. "
                             "findings는 중요한 것만(문제 없으면 info 1~2개). actions는 정말 필요한 것만, 없으면 빈 배열. "
                             "restart_service의 target은 서비스 목록의 unit 이름, view_ip의 target은 IP 하나."}],
-                    "temperature": 0.2, "max_tokens": 1500,
+                    "temperature": 0.2, "max_tokens": 800,
                     "response_format": {"type": "json_schema", "json_schema": {"name": "briefing", "schema": BRIEFING_SCHEMA}},
                 })
                 r.raise_for_status()
@@ -589,9 +590,9 @@ class Analyst:
                         {"role": "user", "content":
                             f"<data>\n{json.dumps(stats, ensure_ascii=False, separators=(',', ':'))}\n</data>\n\n"
                             f"위 데이터는 {label} 하루({self.local_name_fn()} 서버와 다른 서버들) 통계다. 하루 보고서를 작성해. "
-                            "summary는 하루 총평 3~5문장(가장 중요한 사건과 시각 포함). findings는 중요한 것만 최대 6개. "
+                            "summary는 하루 총평 2~3문장(가장 중요한 사건과 시각 포함). findings는 중요한 것만 최대 3개. "
                             "actions는 정말 필요한 것만, 없으면 빈 배열. 수치는 데이터에 있는 그대로만 써."}],
-                    "temperature": 0.2, "max_tokens": 1800,
+                    "temperature": 0.2, "max_tokens": 900,
                     "response_format": {"type": "json_schema", "json_schema": {"name": "daily", "schema": BRIEFING_SCHEMA}},
                 })
                 dur = time.time() - t0
@@ -648,6 +649,8 @@ class Analyst:
         for i, nid in enumerate([None] + sorted(self.node_ids_fn())):
             if now < midnight + timedelta(minutes=DAILY_STAGGER_MIN * i):
                 return None
+            if self._backoff.get(("daily", nid, label), 0) > time.time():
+                continue
             if self.db("SELECT 1 FROM ai_reports WHERE trigger='일일' AND day=? AND COALESCE(node_id, 0)=?",
                        (label, nid or 0), one=True):
                 continue
@@ -662,6 +665,8 @@ class Analyst:
     # ------------------------------------------------------------ scheduler
 
     def due_trigger(self) -> str | None:
+        if self._backoff.get(("event",), 0) > time.time():
+            return None
         last = self.db("SELECT MAX(ts) t FROM ai_reports WHERE trigger != '일일' AND node_id IS NULL", one=True)["t"] or 0
         now = time.time()
         if BRIEFING_HOURS > 0 and now - last >= BRIEFING_HOURS * 3600:
@@ -669,7 +674,7 @@ class Analyst:
         if now - last >= EVENT_COOLDOWN:
             if self.db("SELECT 1 FROM alerts WHERE kind='ban' AND ts>? LIMIT 1", (last,), one=True):
                 return "IP 차단 발생"
-            if any(e["end"] > last for e in self.events_fn()["events"]):
+            if any(e["end"] > last and set(e["reasons"]) - {"온도"} for e in self.events_fn()["events"]):
                 return "고부하 발생"
         return None
 
@@ -831,16 +836,24 @@ class Analyst:
                         await self.remediate(cands, issues)
                 if not self.lock.locked() and (await self.health())["online"]:
                     job = await asyncio.to_thread(self.daily_due)
-                    if job:
-                        day, nid = job
-                        if nid is None:
-                            await self.daily_report(day)
+                    key = None
+                    try:
+                        if job:
+                            day, nid = job
+                            key = ("daily", nid, day.strftime("%Y-%m-%d"))
+                            if nid is None:
+                                await self.daily_report(day)
+                            else:
+                                await self.briefing("일일", nid, day=day.strftime("%Y-%m-%d"))
                         else:
-                            await self.briefing("일일", nid, day=day.strftime("%Y-%m-%d"))
-                    else:
-                        trigger = await asyncio.to_thread(self.due_trigger)
-                        if trigger:
-                            await self.briefing(trigger)
+                            trigger = await asyncio.to_thread(self.due_trigger)
+                            if trigger:
+                                key = ("event",)
+                                await self.briefing(trigger)
+                    except Exception:
+                        if key:
+                            self._backoff[key] = time.time() + 3600
+                        raise
             except Exception as e:
                 print("ai loop error:", type(e).__name__, e, flush=True)
             await asyncio.sleep(60)

@@ -273,3 +273,32 @@ class AutoBanSparesYou(unittest.TestCase):
         cands, _ = a.red_state()
         self.assertEqual([c["target"] for c in cands if c["type"] == "ban_ip"], ["45.155.205.20"])
 
+
+
+class RetryBackoff(unittest.TestCase):
+    def test_failed_daily_job_is_not_retried_for_an_hour(self):
+        from datetime import datetime as real_dt
+        a, db = make_analyst()
+        db("CREATE TABLE IF NOT EXISTS node_metrics(node_id INTEGER, ts INTEGER)")
+        a.node_ids_fn = lambda: [3]
+        db("INSERT INTO ai_reports(ts, trigger, day) VALUES(1, '일일', '2026-10-09')")  # this server done
+
+        class Fixed(real_dt):
+            @classmethod
+            def now(cls, tz=None):
+                return real_dt(2026, 10, 10, 1, 0, tzinfo=agent.TZ)
+        agent.datetime = Fixed
+        try:
+            self.assertEqual(a.daily_due()[1], 3)
+            a._backoff[("daily", 3, "2026-10-09")] = time.time() + 3600   # what the loop sets after a failure
+            self.assertIsNone(a.daily_due(), "a failed slot must wait instead of re-running every minute")
+        finally:
+            agent.datetime = real_dt
+
+    def test_temperature_alone_does_not_start_a_briefing(self):
+        a, db = make_analyst()
+        agent.BRIEFING_HOURS = 0  # as in production .env: only event-driven briefings during the day
+        a.events_fn = lambda: {"events": [{"end": time.time(), "reasons": ["온도"]}]}
+        self.assertIsNone(a.due_trigger())
+        a.events_fn = lambda: {"events": [{"end": time.time(), "reasons": ["CPU", "온도"]}]}
+        self.assertEqual(a.due_trigger(), "고부하 발생")
