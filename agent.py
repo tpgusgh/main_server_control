@@ -97,6 +97,15 @@ BRIEFING_SCHEMA = {
 }
 
 
+def ip_key(ip: str) -> str:
+    """Same grouping as bans: an IPv4 address, or the /64 an IPv6 address lives in."""
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    return str(a) if a.version == 4 else str(ipaddress.ip_network(f"{a}/64", strict=False))
+
+
 def kst(ts) -> str:
     return datetime.fromtimestamp(ts, TZ).strftime("%m-%d %H:%M")
 
@@ -683,6 +692,7 @@ class Analyst:
             if p.get("once") and self.db("SELECT 1 FROM ai_actions WHERE item=? LIMIT 1", (item,), one=True):
                 continue
             issues.append({"id": item, "text": f"서버 '{p['name']}': {p['error'] or '연결 끊김'}"})
+        spared = {ip_key(r["ip"]) for r in self.db("SELECT DISTINCT ip FROM access_log WHERE event IN ('login_ok','unban')")}
         rows = self.db("SELECT ip, MAX(country) c, SUM(event IN ('anon','denied')) reqs, SUM(event='login_fail') fails "
                        "FROM access_log WHERE ts>=? AND event IN ('anon','denied','login_fail') GROUP BY ip", (now - 86400,))
         for r in rows:
@@ -691,10 +701,10 @@ class Analyst:
                 addr = ipaddress.ip_address(ip)
             except ValueError:
                 continue
-            # IPs that ever logged in successfully are you (e.g. a new mobile IP), never auto-ban them.
-            if addr.is_loopback or addr.is_private or self.is_trusted(ip) or \
-                    self.db("SELECT 1 FROM bans WHERE ip=?", (ip,), one=True) or \
-                    self.db("SELECT 1 FROM access_log WHERE ip=? AND event='login_ok' LIMIT 1", (ip,), one=True):
+            # Never auto-ban: you (a successful login from the same IPv4 / IPv6 /64 — phones rotate addresses
+            # inside their /64), or anything you unbanned by hand (your decision beats the model's).
+            if addr.is_loopback or addr.is_private or self.is_trusted(ip) or ip_key(ip) in spared or \
+                    self.db("SELECT 1 FROM bans WHERE ip=?", (ip,), one=True):
                 continue
             if (r["reqs"] or 0) >= SUSPICIOUS_REQS or (r["fails"] or 0) >= 2:
                 cands.append({"id": f"ban_ip:{ip}", "type": "ban_ip", "target": ip, "server": self.local_name_fn(),

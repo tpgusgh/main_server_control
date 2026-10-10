@@ -254,3 +254,22 @@ class SiteChecks(unittest.TestCase):
         self.assertEqual(sent, ["site_down", "site_up"], "alert after 2 failures, once; recovery on redirect (Access)")
         self.assertTrue(sites.state[site["url"]]["ok"])
 
+
+class AutoBanSparesYou(unittest.TestCase):
+    def test_rotating_ipv6_and_manual_unban_are_never_auto_banned(self):
+        a, db = make_analyst()
+        a.fixers = {}
+        a.services_fn = lambda: []
+        a.status_fn = lambda: {"now": {}, "top": []}
+        now = int(time.time())
+        rows = [("2001:db8:5:6::aaaa", "login_ok"),                        # you, earlier, one address
+                ("2001:db8:5:6::bbbb", "login_fail"), ("2001:db8:5:6::bbbb", "login_fail"),  # you, new address
+                ("45.155.205.10", "login_fail"), ("45.155.205.10", "login_fail"),          # unbanned by admin
+                ("45.155.205.10", "unban"),
+                ("45.155.205.20", "login_fail"), ("45.155.205.20", "login_fail")]          # a stranger
+        for ip, ev in rows:
+            db("INSERT INTO access_log(ts, ip, event) VALUES(?,?,?)", (now - 60, ip, ev))
+        db("CREATE TABLE IF NOT EXISTS ai_actions(item TEXT)")
+        cands, _ = a.red_state()
+        self.assertEqual([c["target"] for c in cands if c["type"] == "ban_ip"], ["45.155.205.20"])
+
