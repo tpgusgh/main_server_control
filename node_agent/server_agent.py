@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # hostsec.py ships next to this file
 import hostsec  # noqa: E402
 
-VERSION = "1.7"
+VERSION = "1.8"
 CONFIG_PATH = Path(os.environ.get("AGENT_CONFIG", Path(__file__).resolve().parent / "config.json"))
 UNIT_RE = re.compile(r"^[A-Za-z0-9@._-]+\.service$")
 SAMPLE_INTERVAL = 10
@@ -461,7 +461,7 @@ def service_action(unit, action):
 # ---------------------------------------------------------------- dashboard backups kept on this machine
 
 BACKUP_DIR = Path(__file__).resolve().parent / "backups"
-BACKUP_KEEP = 7
+BACKUP_KEEP = 183  # daily backups → about 6 months
 BACKUP_MAX = 500 * 1024 * 1024
 
 

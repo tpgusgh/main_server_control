@@ -96,12 +96,12 @@ def prune():
 
 BACKUP_DIR = BASE / "data" / "backups"
 AFTER_BACKUP: list = []  # async callables run hourly after backup_db (routes_nodes registers the off-site copy)
-BACKUP_KEEP = 7
+BACKUP_KEEP = 183  # daily backups → about 6 months
 HEARTBEAT_URL = os.environ.get("SM_HEARTBEAT_URL", "").strip()
 
 
 def backup_db():
-    """One consistent copy per day (sqlite online backup) + config.json; the oldest beyond 7 are removed.
+    """One consistent copy per day (sqlite online backup) + config.json; the oldest beyond BACKUP_KEEP (~6 months) are removed.
     shortcut: copies stay on this disk, so they cover mistakes/corruption, not disk death — copy them
     to another server once one is added."""
     BACKUP_DIR.mkdir(mode=0o700, exist_ok=True)
