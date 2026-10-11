@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 import alerts
 import cfaccess
 import security
-from core import ACCESS_RETENTION, BAN_EVENTS, BANNED, BAN_AFTER_FAILS, COOKIE, FAIL_WINDOW, GLOBAL_FAIL_SLOWDOWN, IP_LABELS, MIN_PASSWORD_LEN, PASSWORD_HASH, SESSION_IDLE, SESSION_MAX, STATIC, TRUSTED_EXTRA, TRUSTED_NETS, _cfg_lock, _hash_token, ban_ip, country_of, db, fails_since_reset, is_trusted, labeled, log_access, raise_alert, require_auth
+from core import ACCESS_RETENTION, BAN_AFTER_FAILS, COOKIE, FAIL_WINDOW, GLOBAL_FAIL_SLOWDOWN, IP_LABELS, MIN_PASSWORD_LEN, PASSWORD_HASH, SESSION_IDLE, SESSION_MAX, STATIC, TRUSTED_EXTRA, TRUSTED_NETS, _cfg_lock, _hash_token, ban_ip, country_of, db, fails_since_reset, is_trusted, labeled, log_access, raise_alert, require_auth, unban_key
 
 
 router = APIRouter()
@@ -191,18 +191,11 @@ class UnbanBody(BaseModel):
 @router.post("/api/bans/unban")
 def unban(request: Request, body: UnbanBody):
     require_auth(request)
-    row = db("SELECT ip, country FROM bans WHERE key=?", (body.key,), one=True)
-    if not row:
-        raise HTTPException(404, "차단 목록에 없습니다.")
-    db("DELETE FROM bans WHERE key=?", (body.key,))
-    BANNED.discard(body.key)
-    BAN_EVENTS.append(("del", body.key, ""))
-    # An 'unban' row for the target IP resets its failure count.
-    db("INSERT INTO access_log(ts,ip,country,method,path,status,ua,event,detail,email) VALUES(?,?,?,?,?,?,?,?,?,?)",
-       (int(time.time()), row["ip"], row["country"], "-", "-", 0, "", "unban", f"해제: {request.state.ip}", None))
+    ok, msg = unban_key(body.key, request.state.ip)
+    if not ok:
+        raise HTTPException(404, msg)
     request.state.event = "action"
     request.state.detail = f"unban {body.key}"
-    raise_alert("unban", row["ip"], row["country"], f"{request.state.ip} 에서 차단 해제")
     return {"ok": True}
 
 

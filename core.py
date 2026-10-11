@@ -203,7 +203,13 @@ ALERT_LEVEL = {"ban": "critical", "login_fail": "critical", "node_down": "critic
                "config_change": "warning", "disk_forecast": "warning", "monthly": "info", "upgrade": "info", "ai_case": "critical",
                "exposure": "critical", "guard": "warning"}
 
-def raise_alert(kind: str, ip: str, country: str, message: str, throttle: int = 0, push: bool = True):
+def unblock_button(key: str) -> list:
+    """Discord button under a block alert (discord_bot.py asks for confirmation before acting)."""
+    return [{"type": 1, "components": [{"type": 2, "style": 4, "label": "차단 풀기", "custom_id": f"unblock:{key}"[:100]}]}]
+
+
+def raise_alert(kind: str, ip: str, country: str, message: str, throttle: int = 0, push: bool = True,
+                components: list | None = None):
     """Store an alert for the dashboard and push it to Telegram/Discord (if configured)."""
     now = time.time()
     if throttle:
@@ -224,7 +230,23 @@ def raise_alert(kind: str, ip: str, country: str, message: str, throttle: int = 
                                 [("IP", f"`{ip}`{label}" if is_ip else None, True),
                                  ("국가", f"{flag} {country}".strip() if country else None, True),
                                  ("서버", ip.removeprefix("http://") if not is_ip and ip else None, True)],
-                                footer=PUBLIC_HOST))
+                                footer=PUBLIC_HOST),
+                    components or (unblock_button(ban_key(ip)) if kind in ("ban", "ai_fix") and is_ip else None))
+
+
+def unban_key(key: str, by: str) -> tuple[bool, str]:
+    """Lift a dashboard ban (and, via BAN_EVENTS, the shared firewall blocks). `by` is who did it, for the log."""
+    row = db("SELECT ip, country FROM bans WHERE key=?", (key,), one=True)
+    if not row:
+        return False, "차단 목록에 없습니다."
+    db("DELETE FROM bans WHERE key=?", (key,))
+    BANNED.discard(key)
+    BAN_EVENTS.append(("del", key, ""))
+    # An 'unban' row for the target IP resets its failure count.
+    db("INSERT INTO access_log(ts,ip,country,method,path,status,ua,event,detail,email) VALUES(?,?,?,?,?,?,?,?,?,?)",
+       (int(time.time()), row["ip"], row["country"], "-", "-", 0, "", "unban", f"해제: {by}", None))
+    raise_alert("unban", row["ip"], row["country"], f"{by} 에서 차단 해제")
+    return True, row["ip"]
 
 
 def _hash_token(token: str) -> str:

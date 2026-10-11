@@ -57,15 +57,21 @@ def _discord_payload(text: str, embed: dict | None) -> dict:
     return p
 
 
-def _discord_bot(text: str, embed: dict | None = None):
+def bot_auth() -> dict:
+    return {"Authorization": f"Bot {DC_BOT}"}
+
+
+def _discord_bot(text: str, embed: dict | None = None, components: list | None = None):
     global _dm_channel
-    auth = {"Authorization": f"Bot {DC_BOT}"}
     if not _dm_channel:  # open (or reuse) the DM channel with the owner once
-        _dm_channel = _post(f"{DC_API}/users/@me/channels", {"recipient_id": DC_USER}, auth)["id"]
-    _post(f"{DC_API}/channels/{_dm_channel}/messages", _discord_payload(text, embed), auth)
+        _dm_channel = _post(f"{DC_API}/users/@me/channels", {"recipient_id": DC_USER}, bot_auth())["id"]
+    payload = _discord_payload(text, embed)
+    if components:  # buttons only work on messages sent by the bot itself (handled by discord_bot.py)
+        payload["components"] = components
+    _post(f"{DC_API}/channels/{_dm_channel}/messages", payload, bot_auth())
 
 
-def send_now(text: str, embed: dict | None = None):
+def send_now(text: str, embed: dict | None = None, components: list | None = None):
     """text is the plain fallback (Telegram); Discord gets the embed when one is given."""
     if TG_TOKEN and TG_CHAT:
         _post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
@@ -73,14 +79,14 @@ def send_now(text: str, embed: dict | None = None):
     if DISCORD:
         _post(DISCORD, _discord_payload(text, embed))
     if DC_BOT and (DC_CHANNEL or DC_USER):
-        _discord_bot(text, embed)
+        _discord_bot(text, embed, components)
 
 
 def _worker():
     while True:
-        text, embed = _q.get()
+        text, embed, components = _q.get()
         try:
-            send_now(text, embed)
+            send_now(text, embed, components)
         except Exception as e:
             print("alert push failed:", type(e).__name__, flush=True)
         time.sleep(1)  # stay well under provider rate limits
@@ -90,9 +96,9 @@ if CHANNELS:
     threading.Thread(target=_worker, daemon=True).start()
 
 
-def push(text: str, embed: dict | None = None):
+def push(text: str, embed: dict | None = None, components: list | None = None):
     if CHANNELS:
         try:
-            _q.put_nowait((text, embed))
+            _q.put_nowait((text, embed, components))
         except queue.Full:
             pass
