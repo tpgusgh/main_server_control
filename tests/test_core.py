@@ -397,3 +397,32 @@ class FleetLogic(unittest.TestCase):
         agent.CLAUDE_LIMITS["unifiedWindows"]["five_hour"]["resetsAt"] = time.time() - 1
         self.assertEqual(agent.budget_level(), "ok", "window already reset")
         agent.CLAUDE_LIMITS.clear()
+
+
+class PortGuard(unittest.TestCase):
+    def load_smblock(self):
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("smblock", str(Path(__file__).resolve().parent.parent / "node_agent" / "sm-block"))
+        spec = importlib.util.spec_from_loader("smblock", loader)
+        m = importlib.util.module_from_spec(spec)
+        loader.exec_module(m)
+        m.ssh_ports = lambda: [22, 2222]
+        return m
+
+    def test_ssh_and_tailscale_can_never_be_closed(self):
+        m = self.load_smblock()
+        g = m.clean_guard({"lockdown": True, "internal_tcp": [22, 2222, 554, "x", 70000], "internal_udp": [41641, 5353],
+                           "allow_tcp": [443]}, dict(m.GUARD_DEFAULT))
+        self.assertEqual(g["internal_tcp"], [554])
+        self.assertEqual(g["internal_udp"], [5353])
+        rules = m.guard_ruleset(g)
+        self.assertIn("elements = { 22, 443, 2222 }", rules, "SSH ports always allowed from the internet")
+        self.assertIn("elements = { 41641 }", rules)
+        for safe in ("ct state established,related accept", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7", 'iif "lo" accept'):
+            self.assertIn(safe, rules)
+        self.assertLess(rules.index("192.168.0.0/16"), rules.index("counter name closed drop"), "LAN accepted before any drop")
+        off = m.guard_ruleset(m.clean_guard({"lockdown": False}, g))
+        self.assertNotIn("    counter name closed drop", off.replace("tcp dport @internal_tcp counter name closed drop", ""))
+        with self.assertRaises(ValueError):
+            m.clean_guard({"allow_tcp": list(range(200))}, dict(m.GUARD_DEFAULT))

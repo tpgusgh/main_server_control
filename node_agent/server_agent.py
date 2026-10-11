@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # hostsec.py ships next to this file
 import hostsec  # noqa: E402
 
-VERSION = "2.0"
+VERSION = "2.1"
 CONFIG_PATH = Path(os.environ.get("AGENT_CONFIG", Path(__file__).resolve().parent / "config.json"))
 UNIT_RE = re.compile(r"^[A-Za-z0-9@._-]+\.service$")
 SAMPLE_INTERVAL = 10
@@ -267,7 +267,7 @@ class Sampler(threading.Thread):
             self._host_t = now
             self.host = {"ssh": hostsec.ssh_events(), "sessions": login_sessions(), "security": hostsec.security_facts(),
                          "power": power_state(), "blocker": hostsec.blocked(),  # None = install-blocker.sh not run
-                         "macs": hostsec.macs(), "upgrade": hostsec.upgrade_status()}
+                         "macs": hostsec.macs(), "upgrade": hostsec.upgrade_status(), "guard": hostsec.guard_status()}
 
     def run(self):
         while True:
@@ -510,6 +510,17 @@ class Handler(BaseHTTPRequestHandler):
             ok, msg = hostsec.request_upgrade()
             print(f"apt upgrade requested from {self.client_address[0]} -> {ok}", flush=True)
             return self.reply(200 if ok else 409, {"ok": True, "detail": msg} if ok else {"detail": msg})
+        if self.path in ("/v1/guard", "/v1/guard/refresh"):  # port guard config → root sm-block re-validates it
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n)) if 0 < n <= 4096 else {}
+            except ValueError:
+                return self.reply(400, {"detail": "bad json"})
+            ok, msg = hostsec.guard_refresh() if self.path.endswith("refresh") else hostsec.guard_request(body)
+            sampler.host["guard"] = hostsec.guard_status()
+            print(f"{self.path} {body} from {self.client_address[0]} -> {ok}", flush=True)
+            return self.reply(200 if ok else 409, {"ok": True, "detail": msg, "guard": sampler.host["guard"]} if ok
+                              else {"detail": msg})
         if self.path == "/v1/wake":  # relay a Wake-on-LAN packet onto this server's LAN
             try:
                 n = int(self.headers.get("Content-Length") or 0)

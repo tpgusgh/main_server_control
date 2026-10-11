@@ -432,6 +432,26 @@
       <tbody id="bans"></tbody>
     </table></div>
 
+    <div class="section-title"><h2>외부 노출 차단</h2><span class="sub">인터넷(공인 IP)에서 들어오는 연결만 막음 · LAN·Tailscale·Cloudflare 터널은 그대로 · SSH는 항상 열림</span>
+      <div class="right"><button class="btn" id="guardRefresh">다시 확인</button></div></div>
+    <div class="card table-wrap"><table class="fleet">
+      <thead><tr><th>서버</th><th>외부 차단 모드</th><th>인터넷 허용 포트</th><th>내부 전용 포트</th><th class="r">막은 연결</th><th></th></tr></thead>
+      <tbody id="guardRows"></tbody>
+    </table></div>
+    <div class="grid">
+      <div>
+        <div class="section-title"><h2>Cloudflare 터널 공개 주소</h2><span class="sub">매시간 로그인 없이 열리는지 확인</span></div>
+        <div class="card table-wrap"><table>
+          <thead><tr><th>주소</th><th>서버 → 대상</th><th>상태</th><th></th></tr></thead>
+          <tbody id="tunnelRows"></tbody>
+        </table></div>
+      </div>
+      <div>
+        <div class="section-title"><h2>공유기 포트포워딩 (UPnP)</h2><span class="sub">카메라가 몰래 여는 경우가 많음 · 매시간 확인</span></div>
+        <div class="card" id="upnpView"></div>
+      </div>
+    </div>
+
     <div class="section-title"><h2>설정 변경 감지</h2><span class="sub">매시간 사용자·sudo·SSH 키·cron·부팅 서비스·SSH 설정·열린 포트를 비교 · 바뀌면 AI가 조사</span></div>
     <div class="card table-wrap"><table>
       <thead><tr><th>시각</th><th>서버</th><th>변경 내용</th></tr></thead>
@@ -461,6 +481,15 @@
   <h3 id="confirmTitle"></h3>
   <p id="confirmText"></p>
   <div class="row"><button class="btn" id="confirmNo" type="button">취소</button><button class="btn primary" id="confirmYes" type="button">실행</button></div>
+</dialog>
+
+<dialog id="pwModal" aria-labelledby="pwTitle">
+  <form method="dialog" class="add-form" id="pwForm">
+    <h3 id="pwTitle">비밀번호 확인</h3>
+    <p id="pwText"></p>
+    <label>대시보드 비밀번호<input class="input" type="password" id="pwInput" autocomplete="current-password" maxlength="256"></label>
+    <div class="row"><button class="btn" value="cancel" formnovalidate>취소</button><button class="btn primary" value="ok">확인</button></div>
+  </form>
 </dialog>
 
 <dialog id="reportModal" class="wide" aria-label="AI 보고서"><div id="reportBody"></div></dialog>

@@ -476,7 +476,7 @@ const ALERT_KIND = { new_ip: ["새 IP 로그인", "warn"], login_fail: ["로그�
   power: ["전원 조작", "warn"], site_down: ["사이트 다운", "crit"], site_up: ["사이트 복구", "good"],
   login_risk: ["수상한 로그인", "crit"], ai_risk: ["AI 위험 감지", "warn"],
   config_change: ["설정 변경", "warn"], disk_forecast: ["디스크 예측", "warn"], monthly: ["월간 가동률", ""],
-  upgrade: ["업그레이드", ""], ai_case: ["AI 조사", "crit"] };
+  upgrade: ["업그레이드", ""], ai_case: ["AI 조사", "crit"], exposure: ["인터넷 공개", "crit"], guard: ["외부 차단 설정", "warn"] };
 
 async function unbanIp(b) {
   if (!(await confirmDialog("차단 해제", `${b.key} 의 영구 차단을 풀까요? 실패 횟수도 0으로 초기화됩니다.`, false))) return;
@@ -542,6 +542,7 @@ async function loadSecurity() {
 
   api("/api/hostblock").then((r) => renderHostBlocks("l", r.installed ? r.blocked : null, null)).catch(() => {});
   loadIntegrity().catch(() => {});
+  loadGuard().catch(() => {});
   loadAiActions().catch(() => {});
   const [{ sessions }, me, { bans }, alertRows] = await Promise.all([api("/api/sessions"), api("/api/me"), api("/api/bans"), loadAlertBadge()]);
   $("banRule").textContent = `신뢰 IP가 아닌 곳에서 비밀번호를 ${me.ban_after}번 틀리면 영구 차단 · IPv6는 /64 대역 단위`;
@@ -965,7 +966,8 @@ $("memForm").addEventListener("submit", (e) => { e.preventDefault(); const v = $
 const CASE_KIND = { config_change: "설정 변경", ssh_login: "SSH 로그인", login_risk: "수상한 로그인", manual: "직접 요청" };
 const VERDICT = { benign: ["정상", "good"], suspicious: ["확인 필요", "warn"], malicious: ["공격", "crit"], unknown: ["판단 보류", ""] };
 const TOOL_LABEL = { ip_history: "IP 접속 기록", ip_across_servers: "전체 서버에서 IP 확인", server_state: "서버 상태", service_logs: "서비스 로그",
-  recent_web_attacks: "최근 웹 공격", past_cases: "지난 조사 검색", block_ip: "IP 차단", restart_service: "서비스 재시작" };
+  recent_web_attacks: "최근 웹 공격", past_cases: "지난 조사 검색", block_ip: "IP 차단", restart_service: "서비스 재시작",
+  close_port: "포트 내부 전용으로" };
 function casePill(c) {
   if (c.status === "queued") return h("span", { class: "pill" }, "대기");
   if (c.status === "running") return h("span", { class: "pill warn" }, "조사 중");
@@ -1108,6 +1110,81 @@ async function loadFleet(d) {
   $("fleetMeta").textContent = `가동률은 중앙서버 기준으로 매분 기록 · ${f.uptime.this.month} · 디스크는 최근 14일 추세로 예측 · 최신 에이전트 ${f.agent_latest}`;
   return f;
 }
+
+// ---------------------------------------------------------------- port guard (외부 차단 모드) + exposure
+
+function askPassword(title, text) {
+  const dlg = $("pwModal");
+  $("pwTitle").textContent = title;
+  $("pwText").textContent = text;
+  $("pwInput").value = "";
+  dlg.showModal();
+  $("pwInput").focus();
+  return new Promise((resolve) => dlg.addEventListener("close", () => {
+    const v = dlg.returnValue === "ok" ? $("pwInput").value : "";
+    $("pwInput").value = "";
+    resolve(v);
+  }, { once: true }));
+}
+const parsePorts = (v) => [...new Set(v.split(/[\s,]+/).filter(Boolean).map(Number).filter((n) => Number.isInteger(n) && n > 0 && n < 65536))];
+async function guardChange(srv, cfg, label) {
+  let password = "";
+  const g = srv.guard || {};
+  const weak = (g.lockdown && cfg.lockdown === false) || (cfg.allow_tcp && cfg.allow_tcp.some((p) => !(g.allow_tcp || []).includes(p)))
+    || (cfg.internal_tcp && (g.internal_tcp || []).some((p) => !cfg.internal_tcp.includes(p)));
+  if (weak) {
+    password = await askPassword(`${srv.name}: ${label}`, "보안을 낮추는 변경이라 비밀번호를 한 번 더 확인합니다. 틀리면 로그인 실패로 셉니다.");
+    if (!password) return;
+  } else if (!(await confirmDialog("외부 차단 설정", `${srv.name}: ${label}`, false))) return;
+  try { await post("/api/guard", { node: srv.node, ...cfg, password }); toast("적용했습니다."); setTimeout(() => loadGuard().catch(() => {}), 1500); }
+  catch (err) { toast(err.message, true); }
+}
+function portEditor(srv, key, title) {
+  const cur = (srv.guard && srv.guard[key]) || [];
+  return h("button", { class: "btn link", title: "눌러서 바꾸기", onclick: () => {
+    const v = prompt(`${srv.name} · ${title} (쉼표로 구분, 비우면 없음)`, cur.join(", "));
+    if (v == null) return;
+    guardChange(srv, { [key]: parsePorts(v) }, `${title} → ${parsePorts(v).join(", ") || "없음"}`);
+  } }, cur.length ? cur.join(", ") : "없음");
+}
+
+async function loadGuard() {
+  const r = await api("/api/guard");
+  fill($("guardRows"), r.servers.map((srv) => {
+    const g = srv.guard;
+    if (!g) return h("tr", {}, h("td", {}, h("b", {}, srv.name)), h("td", { colspan: "5" }, h("span", { class: "muted" },
+      srv.node != null && verLt(srv.version, "2.1") ? `에이전트 2.1 + 최신 sm-block 필요 (지금 ${srv.version || "?"}) — 서버 목록의 업데이트 안내 참고`
+        : `최신 sm-block 필요 — 그 서버에서: sudo bash ${srv.node == null ? "~/server-monitor" : "~"}/node_agent/install-blocker.sh`)));
+    const st = g.stats || {};
+    return h("tr", {},
+      h("td", {}, h("b", {}, srv.name), g.error ? h("div", { class: "err-text" }, g.error) : null),
+      h("td", {}, h("button", { class: "switch", role: "switch", "aria-checked": String(!!g.lockdown),
+        onclick: () => guardChange(srv, { lockdown: !g.lockdown }, g.lockdown ? "외부 차단 모드 끄기" : "외부 차단 모드 켜기 (허용 포트 말고는 인터넷에서 못 들어옴)") },
+        h("i"), h("span", {}, g.lockdown ? "켜짐 — 허용 포트만" : "꺼짐"))),
+      h("td", {}, h("span", { class: "mono" }, `SSH ${g.ssh.join(",")} · Tailscale udp/${g.tailscale_udp} · `), portEditor(srv, "allow_tcp", "인터넷 허용 TCP 포트")),
+      h("td", {}, g.lockdown ? h("span", { class: "muted" }, "모드 켜짐 — 허용 외 전부") : portEditor(srv, "internal_tcp", "내부 전용 TCP 포트 (인터넷 출발만 차단)")),
+      h("td", { class: "r num" }, `${st.closed ?? 0} · 과다 ${st.flood ?? 0}`),
+      h("td", { class: "muted" }, `분당 새 연결 ${g.rate}회 넘으면 차단`));
+  }), 6, "");
+  const ok = new Set(r.public_ok);
+  fill($("tunnelRows"), r.tunnels.map((t) => h("tr", {},
+    h("td", { class: "mono" }, t.host), h("td", {}, `${t.server} → `, h("span", { class: "mono" }, t.service)),
+    h("td", {}, t.state === "access" ? h("span", { class: "pill good" }, "Access 로그인 필요") :
+      t.state === "public" ? h("span", { class: `pill ${ok.has(t.host) ? "" : "crit"}` }, `로그인 없이 공개 (HTTP ${t.code})${ok.has(t.host) ? " · 허용함" : ""}`) :
+      h("span", { class: "pill warn" }, `확인 실패 ${t.error || ""}`)),
+    h("td", { class: "actions" }, t.state === "public" ? h("button", { class: "btn", onclick: async () => {
+      await post("/api/exposure/allow", { host: t.host, allowed: !ok.has(t.host) }); loadGuard();
+    } }, ok.has(t.host) ? "허용 취소" : "공개 허용") : null))), 4, "확인 전입니다 (매시간, 또는 ‘다시 확인’)");
+  const entries = Object.entries(r.upnp);
+  put($("upnpView"), entries.length ? entries.map(([name, m]) => h("div", {}, h("b", {}, name), " — ",
+    m && m.length ? h("ul", { class: "plain" }, m.map((x) => h("li", { class: "mono" }, x)))
+      : h("span", { class: "muted" }, "포트포워딩 없음 (또는 공유기 UPnP 꺼짐 — 좋은 상태)")))
+    : h("p", { class: "muted" }, "첫 확인 전입니다 (1시간 안)"),
+    h("p", { class: "muted ai-note" }, "카메라는 공유기 설정에서 UPnP를 끄고, 가능하면 카메라 자체의 인터넷(P2P 클라우드)도 막아 두세요."));
+}
+$("guardRefresh").addEventListener("click", async () => {
+  try { await post("/api/guard/refresh", { node: null }); toast("다시 확인했습니다."); loadGuard(); } catch (err) { toast(err.message, true); }
+});
 
 async function loadIntegrity() {
   const f = await api("/api/fleet");

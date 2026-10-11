@@ -11,7 +11,14 @@ so automation can never lock you out. The table is separate from ufw and restore
   sm-block list                JSON list
   sm-block process             handle queued requests (sm-block-queue.service)
                                ("upgrade" requests run apt-get update + upgrade; no arguments accepted)
-  sm-block restore             re-apply saved list (boot)
+  sm-block restore             re-apply saved list and port guard (boot)
+  sm-block guard               show the port guard (외부 차단 모드) config
+
+Port guard (table `inet sm_guard`, separate from the block list so one can't break the other):
+traffic from PUBLIC source addresses may only reach the allowed ports (SSH is always allowed, as is
+Tailscale's UDP 41641); LAN, Tailscale, loopback, ICMP and replies to our own connections are never
+touched. Allowed public ports are rate limited per source (new connections/minute). With the guard
+off, listed "internal only" ports are still closed to public sources.
 """
 import ipaddress
 import json
@@ -27,6 +34,9 @@ QUEUE = f"{DIR}/requests"
 NFT = "/usr/sbin/nft"
 INTERNAL = [ipaddress.ip_network(n) for n in ("100.64.0.0/10", "fd7a:115c:a1e0::/48")]
 MAX_ENTRIES = 5000
+GUARD = f"{DIR}/guard.json"            # root only
+GUARD_DEFAULT = {"lockdown": False, "allow_tcp": [], "allow_udp": [], "internal_tcp": [], "internal_udp": [], "rate": 30}
+TS_UDP = 41641
 
 
 def load() -> dict:
@@ -76,12 +86,119 @@ def old_upgrade():
         return None
 
 
-def write_public(d: dict, results: dict, upgrade=None):
+def ssh_ports() -> list[int]:
+    try:
+        r = subprocess.run(["sshd", "-T"], capture_output=True, text=True, timeout=10)
+        ports = sorted({int(l.split()[1]) for l in r.stdout.splitlines() if l.startswith("port ")})
+        return ports or [22]
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return [22]
+
+
+def load_guard() -> dict:
+    try:
+        with open(GUARD) as f:
+            return {**GUARD_DEFAULT, **json.load(f)}
+    except (OSError, ValueError):
+        return dict(GUARD_DEFAULT)
+
+
+def clean_guard(req: dict, cur: dict) -> dict:
+    """Validate a requested config. SSH can never be closed (no lockout), Tailscale UDP stays open."""
+    out = dict(cur)
+    if "lockdown" in req:
+        out["lockdown"] = bool(req["lockdown"])
+    ssh = set(ssh_ports())
+    for k in ("allow_tcp", "allow_udp", "internal_tcp", "internal_udp"):
+        if k in req:
+            vals = req[k]
+            if not isinstance(vals, list) or len(vals) > 100:
+                raise ValueError("포트 목록이 올바르지 않습니다")
+            ports = sorted({int(v) for v in vals if str(v).isdigit() and 0 < int(v) < 65536})
+            if k == "internal_tcp":
+                ports = [p for p in ports if p not in ssh]
+            if k == "internal_udp":
+                ports = [p for p in ports if p != TS_UDP]
+            out[k] = ports
+    if "rate" in req:
+        out["rate"] = max(5, min(int(req["rate"]), 600))
+    return out
+
+
+def guard_ruleset(g: dict) -> str:
+    ssh = ssh_ports()
+    tcp = sorted(set(g["allow_tcp"]) | set(ssh))
+    udp = sorted(set(g["allow_udp"]) | {TS_UDP})
+    elems = lambda xs: f" elements = {{ {', '.join(map(str, xs))} }};" if xs else ""
+    tail = "    counter name closed drop\n" if g["lockdown"] else (
+        ("    tcp dport @internal_tcp counter name closed drop\n" if g["internal_tcp"] else "") +
+        ("    udp dport @internal_udp counter name closed drop\n" if g["internal_udp"] else ""))
+    return f"""table inet sm_guard
+delete table inet sm_guard
+table inet sm_guard {{
+  counter closed {{ }}
+  counter flood {{ }}
+  set pub_tcp {{ type inet_service;{elems(tcp)} }}
+  set pub_udp {{ type inet_service;{elems(udp)} }}
+  set internal_tcp {{ type inet_service;{elems(g["internal_tcp"])} }}
+  set internal_udp {{ type inet_service;{elems(g["internal_udp"])} }}
+  set flood4 {{ type ipv4_addr; flags dynamic; timeout 2m; }}
+  set flood6 {{ type ipv6_addr; flags dynamic; timeout 2m; }}
+  chain input {{
+    type filter hook input priority -5; policy accept;
+    iif "lo" accept
+    ct state established,related accept
+    ip saddr {{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8 }} accept
+    ip6 saddr {{ fe80::/10, fc00::/7, ::1/128 }} accept
+    meta l4proto {{ icmp, ipv6-icmp }} accept
+    meta nfproto ipv4 tcp dport @pub_tcp ct state new update @flood4 {{ ip saddr limit rate over {g["rate"]}/minute burst {g["rate"]} packets }} counter name flood drop
+    meta nfproto ipv6 tcp dport @pub_tcp ct state new update @flood6 {{ ip6 saddr limit rate over {g["rate"]}/minute burst {g["rate"]} packets }} counter name flood drop
+    tcp dport @pub_tcp accept
+    udp dport @pub_udp accept
+{tail}  }}
+}}
+"""
+
+
+def apply_guard(g: dict) -> str | None:
+    """Returns an error string (the guard table is left as it was) or None."""
+    r = subprocess.run([NFT, "-f", "-"], input=guard_ruleset(g), text=True, capture_output=True)
+    return ("nft 오류: " + r.stderr.strip()[:300]) if r.returncode else None
+
+
+def guard_stats() -> dict:
+    r = subprocess.run([NFT, "-j", "list", "counters", "table", "inet", "sm_guard"], capture_output=True, text=True)
+    out = {}
+    try:
+        for item in json.loads(r.stdout).get("nftables", []):
+            c = item.get("counter")
+            if c:
+                out[c["name"]] = c.get("packets", 0)
+    except ValueError:
+        pass
+    return out
+
+
+def guard_public(error=None) -> dict:
+    g = load_guard()
+    return {**g, "ssh": ssh_ports(), "tailscale_udp": TS_UDP, "stats": guard_stats(), "error": error, "ts": int(time.time())}
+
+
+def old_guard():
+    try:
+        with open(PUBLIC) as f:
+            return json.load(f).get("guard")
+    except (OSError, ValueError):
+        return None
+
+
+def write_public(d: dict, results: dict, upgrade=None, guard=None):
     keep = dict(sorted(results.items(), key=lambda kv: -kv[1]["ts"])[:50])
     tmp = PUBLIC + ".tmp"
     with open(tmp, "w") as f:
         json.dump({"blocked": [{"key": k, **v} for k, v in sorted(d.items(), key=lambda kv: -kv[1]["ts"])],
-                   "results": keep, "upgrade": upgrade if upgrade is not None else old_upgrade()}, f)
+                   "results": keep, "upgrade": upgrade if upgrade is not None else old_upgrade(),
+                   "guard": guard or {**(old_guard() or {}), "stats": guard_stats()}}, f)
     os.chmod(tmp, 0o644)
     os.replace(tmp, PUBLIC)
 
@@ -164,7 +281,7 @@ def run_upgrade(d: dict, results: dict):
 
 def process(d: dict):
     """Handle queued request files (written by the unprivileged user). Each is validated, then deleted."""
-    results, changed, upgrade = old_results(), False, False
+    results, changed, upgrade, guard = old_results(), False, False, None
     names = sorted(n for n in os.listdir(QUEUE) if n.endswith(".json"))[:50]
     for name in names:
         path, rid = os.path.join(QUEUE, name), name[:-5]
@@ -177,6 +294,19 @@ def process(d: dict):
                 msg = do_add(d, str(req.get("ip", "")), str(req.get("reason", "")))
             elif req.get("op") == "del":
                 msg = do_del(d, str(req.get("key", "")))
+            elif req.get("op") == "guard":
+                g = clean_guard(req.get("config") or {}, load_guard())
+                err = apply_guard(g)
+                if err:
+                    guard = guard_public(err)
+                    raise ValueError(err)
+                fd = os.open(GUARD + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w") as f:
+                    json.dump(g, f)
+                os.replace(GUARD + ".tmp", GUARD)
+                guard, msg = guard_public(), "외부 차단 설정 적용됨"
+            elif req.get("op") == "stats":
+                guard, msg = guard_public((old_guard() or {}).get("error")), "갱신"
             elif req.get("op") == "upgrade":
                 prev = old_upgrade() or {}
                 if prev.get("state") == "running" and time.time() - prev.get("started", 0) < 7200:
@@ -196,7 +326,7 @@ def process(d: dict):
     if changed:
         apply(d)
         save(d)
-    write_public(d, results)
+    write_public(d, results, guard=guard)
     if upgrade:
         run_upgrade(d, results)
 
@@ -219,8 +349,13 @@ def main(argv):
             return
         elif cmd == "restore":
             apply(d)
-            write_public(d, old_results())
-            print(f"restored {len(d)}")
+            err = apply_guard(load_guard())
+            write_public(d, old_results(), guard=guard_public(err))
+            print(f"restored {len(d)}" + (f"; guard: {err}" if err else "; guard ok"))
+            return
+        elif cmd == "guard":
+            print(json.dumps(guard_public(), ensure_ascii=False, indent=2))
+            print(guard_ruleset(load_guard()))
             return
         else:
             sys.exit(__doc__)

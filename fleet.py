@@ -6,13 +6,15 @@ import re
 import time
 from datetime import datetime, timedelta
 
+import httpx
 import psutil
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel, Field
 
 import monitor
 from agent import TZ
-from core import db, local_name, raise_alert, require_auth
+from core import confirm_password, db, local_name, raise_alert, require_auth
 from node_agent import hostsec
 from routes_nodes import hub
 
@@ -195,6 +197,47 @@ def remember_macs():
             db("UPDATE nodes SET macs=? WHERE id=?", (json.dumps(macs), n["id"]))
 
 
+# ---------------------------------------------------------------- exposure: tunnels without Access
+
+def all_tunnels() -> list[dict]:
+    out = [{**t, "server": local_name()} for t in hostsec.tunnel_hosts()]
+    for n in hub.nodes():
+        snap = ((hub.state.get(n["id"]) or {}).get("data") or {}).get("integrity") or {}
+        for line in snap.get("tunnels") or []:
+            host, _, svc = line.partition(" → ")
+            out.append({"host": host, "service": svc, "server": n["name"]})
+    return out
+
+
+async def probe(host: str) -> dict:
+    """Unauthenticated request, no redirects: Access answers with a redirect to <team>.cloudflareaccess.com."""
+    try:
+        async with httpx.AsyncClient(timeout=8, follow_redirects=False) as c:
+            r = await c.get(f"https://{host}/")
+        loc = r.headers.get("location", "")
+        protected = (300 <= r.status_code < 400 and ".cloudflareaccess.com/" in loc) or "cf-access" in loc.lower()
+        return {"state": "access" if protected else "public", "code": r.status_code}
+    except httpx.HTTPError as e:
+        return {"state": "error", "code": None, "error": type(e).__name__}
+
+
+async def check_tunnels():
+    allowed = set(json.loads(_kv("public_ok") or "[]"))
+    prev = {t["host"]: t for t in json.loads(_kv("tunnels") or "[]")}
+    out = []
+    for t in await asyncio.to_thread(all_tunnels):
+        res = await probe(t["host"])
+        out.append({**t, **res, "checked": int(time.time())})
+        was = prev.get(t["host"], {}).get("state")
+        if res["state"] == "public" and was != "public" and t["host"] not in allowed:
+            await asyncio.to_thread(raise_alert, "exposure", "", "",
+                                    f"{t['host']} ({t['server']} → {t['service']}) 이(가) Cloudflare Access 로그인 없이 "
+                                    f"인터넷에 공개돼 있습니다 (HTTP {res['code']}). 카메라·관리 화면이면 Zero Trust → Access 에 "
+                                    "이 주소를 추가하세요. 일부러 공개한 거면 보안 탭에서 '공개 허용'을 누르세요.")
+    _kv("tunnels", json.dumps(out))
+    return out
+
+
 # ---------------------------------------------------------------- monthly report + loop
 
 def monthly_report_due() -> str | None:
@@ -225,6 +268,7 @@ async def loop():
                 await asyncio.to_thread(record_disk)
                 await asyncio.to_thread(integrity_all)
                 await asyncio.to_thread(remember_macs)
+                await check_tunnels()
                 for f in await asyncio.to_thread(forecasts):
                     if f.get("days_left") is not None and f["days_left"] <= WARN_DAYS:
                         await asyncio.to_thread(raise_alert, "disk_forecast", "", "",
@@ -308,3 +352,111 @@ async def upgrade(request: Request, body: UpgradeBody):
     request.state.detail = name
     await asyncio.to_thread(raise_alert, "upgrade", "", "", f"서버 '{name}' 패키지 업그레이드 요청 — {msg}", 0, False)
     return {"ok": True, "detail": msg}
+
+
+# ---------------------------------------------------------------- port guard (외부 차단 모드) + exposure API
+
+def _guard_of(nid):
+    if nid is None:
+        return hostsec.guard_status()
+    return (((hub.state.get(nid) or {}).get("data") or {}).get("host_facts") or {}).get("guard")
+
+
+@router.get("/api/guard")
+def guard_view(request: Request):
+    require_auth(request)
+    servers = [{"node": None, "name": local_name(), "online": True, "guard": hostsec.guard_status(), "version": None}]
+    for n in hub.nodes():
+        st = hub.state.get(n["id"]) or {}
+        servers.append({"node": n["id"], "name": n["name"], "online": st.get("online"), "guard": _guard_of(n["id"]),
+                        "version": (st.get("data") or {}).get("version")})
+    snaps = {r["server"]: json.loads(r["snap"]) for r in db("SELECT server, snap FROM integrity")}
+    upnp = {server_names().get(k, k): v.get("upnp") for k, v in snaps.items() if "upnp" in v}
+    return {"servers": servers, "tunnels": json.loads(_kv("tunnels") or "[]"),
+            "public_ok": json.loads(_kv("public_ok") or "[]"), "upnp": upnp}
+
+
+class GuardBody(BaseModel):
+    node: int | None = None
+    lockdown: bool | None = None
+    allow_tcp: list[int] | None = Field(default=None, max_length=100)
+    allow_udp: list[int] | None = Field(default=None, max_length=100)
+    internal_tcp: list[int] | None = Field(default=None, max_length=100)
+    internal_udp: list[int] | None = Field(default=None, max_length=100)
+    password: str = Field(default="", max_length=256)
+
+
+def weakens(cur: dict | None, cfg: dict) -> bool:
+    """Turning the guard off, opening a port to the internet, or un-restricting a port needs the password."""
+    cur = cur or {}
+    if cur.get("lockdown") and cfg.get("lockdown") is False:
+        return True
+    for k in ("allow_tcp", "allow_udp"):
+        if k in cfg and set(cfg[k]) - set(cur.get(k) or []):
+            return True
+    for k in ("internal_tcp", "internal_udp"):
+        if k in cfg and set(cur.get(k) or []) - set(cfg[k]):
+            return True
+    return False
+
+
+async def apply_guard(nid, cfg: dict) -> tuple[bool, str]:
+    if nid is None:
+        return await asyncio.to_thread(hostsec.guard_request, cfg)
+    node = _node(nid)
+    code, data = await hub._post(node, "/v1/guard", cfg)
+    if code == 404:
+        return False, "에이전트 2.1 이상이 필요합니다"
+    return code == 200, data.get("detail", "")
+
+
+@router.post("/api/guard")
+async def guard_set(request: Request, body: GuardBody):
+    require_auth(request)
+    cfg = body.model_dump(exclude={"node", "password"}, exclude_none=True)
+    cur = _guard_of(body.node)
+    if cur is None:
+        raise HTTPException(409, "이 서버에 최신 sm-block 이 없습니다 — 그 서버에서 sudo bash .../node_agent/install-blocker.sh")
+    if weakens(cur, cfg) and not await run_in_threadpool(confirm_password, request, body.password):
+        raise HTTPException(403, "보안을 낮추는 변경이라 비밀번호가 필요합니다 (틀리면 로그인 실패로 셉니다).")
+    ok, msg = await apply_guard(body.node, cfg)
+    if not ok:
+        raise HTTPException(409, msg or "실패")
+    name = local_name() if body.node is None else _node(body.node)["name"]
+    request.state.event = "action"
+    request.state.detail = f"guard {name} {json.dumps(cfg)[:150]}"
+    await asyncio.to_thread(raise_alert, "guard", "", "", f"서버 '{name}' 외부 차단 설정 변경: {json.dumps(cfg, ensure_ascii=False)[:300]}",
+                            0, weakens(cur, cfg))
+    return {"ok": True, "detail": msg}
+
+
+class RefreshBody(BaseModel):
+    node: int | None = None
+
+
+@router.post("/api/guard/refresh")
+async def guard_refresh(request: Request, body: RefreshBody):
+    require_auth(request)
+    if body.node is None:
+        await asyncio.to_thread(hostsec.guard_refresh)
+    else:
+        await hub._post(_node(body.node), "/v1/guard/refresh")
+    await check_tunnels()
+    return {"ok": True}
+
+
+class PublicOkBody(BaseModel):
+    host: str = Field(min_length=3, max_length=200, pattern=r"^[A-Za-z0-9.-]+$")
+    allowed: bool
+
+
+@router.post("/api/exposure/allow")
+def exposure_allow(request: Request, body: PublicOkBody):
+    """'I published this on purpose' — only silences the alert, changes nothing on the network."""
+    require_auth(request)
+    cur = set(json.loads(_kv("public_ok") or "[]"))
+    cur = cur | {body.host.lower()} if body.allowed else cur - {body.host.lower()}
+    _kv("public_ok", json.dumps(sorted(cur)))
+    request.state.event = "action"
+    request.state.detail = f"public_ok {body.host} {body.allowed}"
+    return {"ok": True}

@@ -258,14 +258,15 @@ def integrity_snapshot() -> dict:
             if host in ("*", "0.0.0.0", "::") or not internal(host):  # skip loopback/LAN-only/Tailscale binds
                 ports.add(f"tcp/{port}")
     return {"users": users, "sudo": sorted(sudo), "ssh_keys": sorted(keys), "cron": cron, "units": units,
-            "user_units": user_units, "sshd_config": _digest(sshd), "ports": sorted(ports, key=lambda p: int(p.split("/")[1]))}
+            "user_units": user_units, "sshd_config": _digest(sshd), "ports": sorted(ports, key=lambda p: int(p.split("/")[1])),
+            "upnp": upnp_mappings() or [], "tunnels": sorted(f"{t['host']} → {t['service']}" for t in tunnel_hosts())}
 
 
 def integrity_diff(old: dict, new: dict) -> list[str]:
     """Human-readable changes between two snapshots (empty when nothing changed)."""
     labels = {"users": "로그인 가능 사용자", "sudo": "sudo 권한", "ssh_keys": "SSH 공개키", "cron": "예약 작업(cron)",
               "units": "부팅 시 켜지는 시스템 서비스", "user_units": "사용자 서비스", "sshd_config": "SSH 서버 설정",
-              "ports": "외부에서 열린 포트"}
+              "ports": "외부에서 열린 포트", "upnp": "공유기 포트포워딩(UPnP)", "tunnels": "Cloudflare 터널 공개 주소"}
     out = []
     for k, label in labels.items():
         a, b = old.get(k), new.get(k)
@@ -329,3 +330,94 @@ def upgrade_status():
             return json.load(f).get("upgrade")
     except (OSError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------- exposure: port guard, router UPnP, tunnels
+
+def guard_status():
+    """Port guard (외부 차단 모드) state from sm-block, or None when sm-block is missing/too old."""
+    try:
+        with open(f"{SM_DIR}/public.json") as f:
+            return json.load(f).get("guard")
+    except (OSError, ValueError):
+        return None
+
+
+def guard_request(config: dict):
+    keys = ("lockdown", "allow_tcp", "allow_udp", "internal_tcp", "internal_udp", "rate")
+    return _request({"op": "guard", "config": {k: config[k] for k in keys if k in config}})
+
+
+def guard_refresh():
+    return _request({"op": "stats"}, wait=4.0)
+
+
+def upnp_mappings(timeout: float = 3.0):
+    """Port forwards the LAN router opened via UPnP (cameras love doing this). None = no UPnP router answered."""
+    import socket
+    import urllib.parse
+    import urllib.request
+    from xml.etree import ElementTree as ET
+    msg = ("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\n"
+           "ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n").encode()
+    loc = None
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(timeout)
+            s.sendto(msg, ("239.255.255.250", 1900))
+            data, addr = s.recvfrom(4096)
+            m = re.search(rb"(?i)^location:\s*(\S+)", data, re.M)
+            if m and internal(addr[0]):
+                loc = m.group(1).decode()
+    except OSError:
+        return None
+    if not loc or not internal(urllib.parse.urlsplit(loc).hostname or ""):  # only ever talk to the LAN router
+        return None
+    try:
+        desc = urllib.request.urlopen(loc, timeout=5).read(200_000)
+        root = ET.fromstring(desc)
+    except Exception:
+        return None
+    ns = "{urn:schemas-upnp-org:device-1-0}"
+    ctrl = stype = None
+    for svc in root.iter(f"{ns}service"):
+        t = (svc.findtext(f"{ns}serviceType") or "")
+        if "WANIPConnection" in t or "WANPPPConnection" in t:
+            ctrl, stype = urllib.parse.urljoin(loc, svc.findtext(f"{ns}controlURL") or ""), t
+            break
+    if not ctrl:
+        return None
+    out = []
+    for i in range(64):
+        body = (f'<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+                f's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'
+                f'<u:GetGenericPortMappingEntry xmlns:u="{stype}"><NewPortMappingIndex>{i}</NewPortMappingIndex>'
+                f'</u:GetGenericPortMappingEntry></s:Body></s:Envelope>').encode()
+        req = urllib.request.Request(ctrl, data=body, headers={
+            "Content-Type": 'text/xml; charset="utf-8"', "SOAPAction": f'"{stype}#GetGenericPortMappingEntry"'})
+        try:
+            x = ET.fromstring(urllib.request.urlopen(req, timeout=5).read(50_000))
+        except Exception:
+            break  # SpecifiedArrayIndexInvalid (end of list) comes back as an HTTP 500
+        val = lambda tag: next((e.text or "" for e in x.iter() if e.tag.endswith(tag)), "")
+        out.append(f"{val('NewProtocol')} {val('NewExternalPort')} → {val('NewInternalClient')}:{val('NewInternalPort')} "
+                   f"({val('NewPortMappingDescription')[:40]})")
+    return out
+
+
+def tunnel_hosts() -> list[dict]:
+    """Hostnames this machine publishes through Cloudflare Tunnel (config files readable by this user)."""
+    import glob
+    out = []
+    for path in glob.glob(str(Path.home() / ".cloudflared" / "*.yml")) + glob.glob("/etc/cloudflared/*.yml"):
+        host = None
+        for line in _read(path).splitlines():
+            m = re.match(r"\s*-?\s*hostname:\s*([A-Za-z0-9.-]+)", line)
+            if m:
+                host = m.group(1).lower()
+                continue
+            m = re.match(r"\s*service:\s*(\S+)", line)
+            if m and host:
+                out.append({"host": host, "service": m.group(1)[:80], "config": Path(path).name})
+                host = None
+    return out
