@@ -49,6 +49,15 @@ def internal(ip: str) -> bool:
     return a.is_private or a.is_loopback or a.is_link_local or any(a in n for n in INTERNAL)
 
 
+def exposed(ip: str) -> bool:
+    """Can a listening address be reached from outside the LAN/Tailscale? 0.0.0.0/:: (all interfaces) or a
+    public address yes; loopback, LAN-only and Tailscale-only binds no."""
+    ip = (ip or "").split("%")[0].strip("[]")
+    if ip in ("0.0.0.0", "::", "*", ""):
+        return True
+    return not internal(ip)
+
+
 def ssh_attackers(events, min_fails: int = 5, window: int = 3600, now: float | None = None) -> dict:
     """{ip: failures in the last `window`s} for outside IPs that never logged in successfully."""
     import time
@@ -200,7 +209,8 @@ def security_facts():
     return {"ssh_password_auth": sshd_value("PasswordAuthentication", "yes"),
             "ssh_root_login": sshd_value("PermitRootLogin", "prohibit-password"),
             "authorized_keys": sum(1 for l in _read(keys).splitlines() if l.strip() and not l.startswith("#")),
-            "firewall": "on" if re.search(r"^ENABLED=yes", _read("/etc/ufw/ufw.conf"), re.M) else "off",
+            "firewall": "on" if re.search(r"^ENABLED=yes", _read("/etc/ufw/ufw.conf"), re.M) else
+                        "on (외부 차단 모드)" if (guard_status() or {}).get("lockdown") else "off",
             "reboot_required": Path("/var/run/reboot-required").exists()}
 
 

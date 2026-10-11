@@ -426,3 +426,13 @@ class PortGuard(unittest.TestCase):
         self.assertNotIn("    counter name closed drop", off.replace("tcp dport @internal_tcp counter name closed drop", ""))
         with self.assertRaises(ValueError):
             m.clean_guard({"allow_tcp": list(range(200))}, dict(m.GUARD_DEFAULT))
+
+
+class Exposure(unittest.TestCase):
+    def test_tailscale_and_lan_binds_are_not_exposed(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "node_agent"))
+        import hostsec
+        for ip, want in (("0.0.0.0", True), ("::", True), ("8.8.8.8", True), ("100.94.77.73", False),
+                         ("fd7a:115c:a1e0::1", False), ("192.168.0.5", False), ("127.0.0.1", False), ("::1", False),
+                         ("fe80::1%eth0", False)):
+            self.assertEqual(hostsec.exposed(ip), want, ip)

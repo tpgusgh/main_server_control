@@ -112,7 +112,7 @@ async def _fix_block_host(nid, ip: str, reason: str):
 def _public_ports() -> list[dict]:
     out = {}
     for c in psutil.net_connections(kind="inet"):
-        if c.status == psutil.CONN_LISTEN and not ipaddress.ip_address(c.laddr.ip.split("%")[0]).is_loopback:
+        if c.status == psutil.CONN_LISTEN and hostsec.exposed(c.laddr.ip):
             try:
                 name = psutil.Process(c.pid).name() if c.pid else None
             except psutil.Error:

@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # hostsec.py ships next to this file
 import hostsec  # noqa: E402
 
-VERSION = "2.1"
+VERSION = "2.2"
 CONFIG_PATH = Path(os.environ.get("AGENT_CONFIG", Path(__file__).resolve().parent / "config.json"))
 UNIT_RE = re.compile(r"^[A-Za-z0-9@._-]+\.service$")
 SAMPLE_INTERVAL = 10
@@ -400,7 +400,7 @@ def sockets():
             except OSError:
                 pass
         ports.append({"ip": ip, "port": port, "pid": pid, "process": name, "cwd": cwd,
-                      "public": not ipaddress.ip_address(ip).is_loopback})
+                      "public": hostsec.exposed(ip)})
     listen_ports = {p["port"] for p in ports}
     inbound, outbound = [], []
     for inode, (lip, lport, rip, rport) in est.items():

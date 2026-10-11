@@ -6,6 +6,8 @@ import time
 
 import httpx
 
+from node_agent import hostsec
+
 POLL_INTERVAL = 10
 OFFLINE_AFTER = 3              # consecutive failed polls (~30s) before a server counts as down
 METRIC_KEEP = 48 * 3600
@@ -84,6 +86,8 @@ class NodeHub:
                                             f"서버 '{node['name']}' 응답 없음 · {st['error']}")
                 st["online"] = False
             return
+        for p in (data.get("now") or {}).get("ports", []):  # judge exposure here too (older agents only checked loopback)
+            p["public"] = hostsec.exposed(p.get("ip", ""))
         was_down = st["online"] is False
         st.update(online=True, fails=0, error=None, last_ok=int(time.time()), data=data)
         if was_down:

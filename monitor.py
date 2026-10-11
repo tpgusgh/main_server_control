@@ -375,7 +375,7 @@ def network(request: Request):
                 except psutil.Error:  # other users' processes: no access without root
                     pass
             listening.append({"ip": c.laddr.ip, "port": c.laddr.port, "pid": c.pid, "process": pname(c.pid),
-                              "cwd": cwd, "public": not ipaddress.ip_address(c.laddr.ip.split("%")[0]).is_loopback,
+                              "cwd": cwd, "public": hostsec.exposed(c.laddr.ip),
                               "killable": killable})
     listening.sort(key=lambda x: x["port"])
 
