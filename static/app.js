@@ -1074,9 +1074,11 @@ function agentUpdateHelp(n, latest) {
   put($("reportBody"),
     h("div", { class: "modal-head" }, h("h3", {}, `${n.name} 에이전트 업데이트 (${n.version || "?"} → ${latest})`),
       h("button", { class: "btn", type: "button", onclick: () => $("reportModal").close() }, "닫기")),
-    h("p", {}, "중앙서버 터미널에 아래 한 줄을 붙여넣으세요. 파일 복사 → 에이전트 재설치 → 방화벽 도구 설치까지 한 번에 하고, "
-      + "SSH 비밀번호와 sudo 비밀번호만 물어봅니다. 토큰·설정은 그대로 유지됩니다."),
-    copyBlock(`scp -r ~/server-monitor/node_agent ${dest}:~/ && ssh -t ${dest} 'bash ~/node_agent/install.sh ${DASHBOARD_TS_IP} && sudo bash ~/node_agent/install-blocker.sh'`),
+    h("p", {}, "두 번에 나눠 실행합니다. 토큰·설정은 그대로 유지됩니다."),
+    h("p", {}, h("b", {}, "① 중앙서버 터미널에서"), ` (${location.hostname} 이 돌아가는 서버, ~/server-monitor 가 있는 곳) — 파일 보내기`),
+    copyBlock(`scp -r ~/server-monitor/node_agent ${dest}:~/`),
+    h("p", {}, h("b", {}, `② ${n.name} 터미널에서`), ` (ssh ${dest} 로 들어가서) — 에이전트 재설치 + 방화벽·업그레이드 도구 설치 (sudo 비밀번호 물어봄)`),
+    copyBlock(`bash ~/node_agent/install.sh ${DASHBOARD_TS_IP} && sudo bash ~/node_agent/install-blocker.sh`),
     n.user ? null : h("p", { class: "muted" }, "계정 이름을 몰라 <사용자>로 남겼습니다 — 붙여넣기 전에 그 서버의 로그인 계정으로 바꾸세요."),
     h("p", { class: "muted" }, "대시보드가 코드를 원격으로 밀어 넣는 방식은 일부러 만들지 않았습니다 — 토큰이 새면 그 서버에서 아무 코드나 실행되는 통로가 되기 때문입니다."));
   $("reportModal").showModal();
