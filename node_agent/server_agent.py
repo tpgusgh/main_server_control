@@ -489,7 +489,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(403, {"detail": "forbidden"})
         if self.path == "/v1/status":
             up = float(read("/proc/uptime", "0").split()[0])
-            return self.reply(200, {"version": VERSION, "host": socket.gethostname(),
+            return self.reply(200, {"version": VERSION, "host": socket.gethostname(), "user": username(os.getuid()),
                                     "os": os_name(),
                                     "kernel": os.uname().release, "uptime": up, "boot_time": time.time() - up,
                                     "cpu_count": os.cpu_count(), "now": sampler.latest, "services": services(),

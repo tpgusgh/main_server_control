@@ -195,13 +195,14 @@ ALERT_TITLES = {"new_ip": "🔔 새 IP 로그인", "login_fail": "⚠️ 로그�
                 "login_risk": "🕵️ AI: 수상한 로그인", "ai_risk": "🛡️ AI 위험 감지",
                 "config_change": "🧩 서버 설정 변경", "disk_forecast": "💽 디스크 가득 참 예상", "monthly": "📈 월간 가동률",
                 "upgrade": "📦 패키지 업그레이드", "ai_case": "🔎 AI 보안 조사 결과",
-                "exposure": "🌍 인터넷에 공개된 주소", "guard": "🧱 외부 차단 설정 변경"}
+                "exposure": "🌍 인터넷에 공개된 주소", "guard": "🧱 외부 차단 설정 변경",
+                "reboot": "🔄 서버 재부팅 완료"}
 ALERT_LEVEL = {"ban": "critical", "login_fail": "critical", "node_down": "critical", "needs_you": "critical",
                "new_ip": "warning", "node_hot": "warning", "power": "warning",
                "unban": "good", "node_up": "good", "ai_fix": "good", "site_down": "critical", "site_up": "good",
                "login_risk": "critical", "ai_risk": "warning",
                "config_change": "warning", "disk_forecast": "warning", "monthly": "info", "upgrade": "info", "ai_case": "critical",
-               "exposure": "critical", "guard": "warning"}
+               "exposure": "critical", "guard": "warning", "reboot": "good"}
 
 def unblock_button(key: str) -> list:
     """Discord button under a block alert (discord_bot.py asks for confirmation before acting)."""

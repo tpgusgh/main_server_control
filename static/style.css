@@ -457,3 +457,5 @@ table.fleet td { vertical-align: top; }
 table.fleet td.actions { display: flex; gap: 6px; justify-content: flex-end; }
 #caseForm { margin-bottom: 10px; }
 .mem-list .btn { white-space: nowrap; flex: none; }
+.copy-block { display: flex; gap: 8px; align-items: flex-start; }
+.copy-block pre { flex: 1; margin: 0; user-select: all; }

@@ -101,6 +101,23 @@ class Ledger:
             self.prev[key] = online
 
 
+def check_boots():
+    """Boot time moved → the server rebooted (also catches reboots too quick to look 'offline')."""
+    cur = {MAIN: (local_name(), psutil.boot_time())}
+    for n in hub.nodes():
+        st = hub.state.get(n["id"]) or {}
+        if st.get("online") and (st.get("data") or {}).get("boot_time"):
+            cur[f"node:{n['id']}"] = (n["name"], st["data"]["boot_time"])
+    for key, (name, boot) in cur.items():
+        prev = _kv(f"boot:{key}")
+        if prev is not None and abs(float(prev) - boot) <= 120:  # agents compute boot time from uptime: allow jitter
+            continue
+        _kv(f"boot:{key}", boot)
+        if prev is not None:
+            raise_alert("reboot", "", "", f"서버 '{name}' 재부팅 완료 · {datetime.fromtimestamp(boot, TZ):%m-%d %H:%M} 부팅, "
+                                          "다시 정상 연결됨")
+
+
 def uptime(month: str) -> list[dict]:
     """month 'YYYY-MM'. The central server is measured against wall-clock time; the others against the
     time the central server could see them (while it was down itself, nothing is known)."""
@@ -263,6 +280,7 @@ async def loop():
     while True:
         try:
             await asyncio.to_thread(ledger.tick)
+            await asyncio.to_thread(check_boots)
             if time.time() - last_hour >= 3600:
                 last_hour = time.time()
                 await asyncio.to_thread(record_disk)

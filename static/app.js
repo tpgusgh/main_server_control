@@ -476,7 +476,8 @@ const ALERT_KIND = { new_ip: ["새 IP 로그인", "warn"], login_fail: ["로그�
   power: ["전원 조작", "warn"], site_down: ["사이트 다운", "crit"], site_up: ["사이트 복구", "good"],
   login_risk: ["수상한 로그인", "crit"], ai_risk: ["AI 위험 감지", "warn"],
   config_change: ["설정 변경", "warn"], disk_forecast: ["디스크 예측", "warn"], monthly: ["월간 가동률", ""],
-  upgrade: ["업그레이드", ""], ai_case: ["AI 조사", "crit"], exposure: ["인터넷 공개", "crit"], guard: ["외부 차단 설정", "warn"] };
+  upgrade: ["업그레이드", ""], ai_case: ["AI 조사", "crit"], exposure: ["인터넷 공개", "crit"], guard: ["외부 차단 설정", "warn"],
+  reboot: ["재부팅 완료", "good"] };
 
 async function unbanIp(b) {
   if (!(await confirmDialog("차단 해제", `${b.key} 의 영구 차단을 풀까요? 실패 횟수도 0으로 초기화됩니다.`, false))) return;
@@ -1061,13 +1062,22 @@ function upgradeText(u, upd) {
   if (u && u.finished) return h("span", {}, base, h("div", { class: "muted" }, `${u.state === "done" ? "완료" : "실패"} ${fmtWhen(u.finished)}${u.upgraded ? ` · ${u.upgraded}개 설치` : ""}`));
   return base;
 }
+function copyBlock(text) {
+  const btn = h("button", { class: "btn primary", type: "button", onclick: async () => {
+    try { await navigator.clipboard.writeText(text); btn.textContent = "복사됨 ✓"; setTimeout(() => { btn.textContent = "복사"; }, 2000); }
+    catch { toast("복사하지 못했습니다 — 직접 선택해서 복사하세요.", true); }
+  } }, "복사");
+  return h("div", { class: "copy-block" }, h("pre", { class: "log-view mono" }, text), btn);
+}
 function agentUpdateHelp(n, latest) {
+  const dest = `${n.user || "<사용자>"}@${n.address.split(":")[0]}`;
   put($("reportBody"),
     h("div", { class: "modal-head" }, h("h3", {}, `${n.name} 에이전트 업데이트 (${n.version || "?"} → ${latest})`),
       h("button", { class: "btn", type: "button", onclick: () => $("reportModal").close() }, "닫기")),
-    h("p", {}, "이 서버(중앙)에서 파일을 복사하고, 그 서버에서 설치 스크립트를 다시 실행하세요. 토큰·설정은 그대로 유지됩니다."),
-    h("pre", { class: "log-view mono" }, `scp -r ~/server-monitor/node_agent <사용자>@${n.address.split(":")[0]}:~/\nssh <사용자>@${n.address.split(":")[0]} bash ~/node_agent/install.sh ${DASHBOARD_TS_IP}`),
-    h("p", { class: "muted" }, "방화벽 자동 차단·패키지 업그레이드 버튼을 쓰려면 그 서버에서 한 번: sudo bash ~/node_agent/install-blocker.sh"),
+    h("p", {}, "중앙서버 터미널에 아래 한 줄을 붙여넣으세요. 파일 복사 → 에이전트 재설치 → 방화벽 도구 설치까지 한 번에 하고, "
+      + "SSH 비밀번호와 sudo 비밀번호만 물어봅니다. 토큰·설정은 그대로 유지됩니다."),
+    copyBlock(`scp -r ~/server-monitor/node_agent ${dest}:~/ && ssh -t ${dest} 'bash ~/node_agent/install.sh ${DASHBOARD_TS_IP} && sudo bash ~/node_agent/install-blocker.sh'`),
+    n.user ? null : h("p", { class: "muted" }, "계정 이름을 몰라 <사용자>로 남겼습니다 — 붙여넣기 전에 그 서버의 로그인 계정으로 바꾸세요."),
     h("p", { class: "muted" }, "대시보드가 코드를 원격으로 밀어 넣는 방식은 일부러 만들지 않았습니다 — 토큰이 새면 그 서버에서 아무 코드나 실행되는 통로가 되기 때문입니다."));
   $("reportModal").showModal();
 }
@@ -1087,6 +1097,7 @@ async function loadFleet(d) {
   const fc = Object.fromEntries(f.forecast.map((x) => [x.server, x]));
   const rows = [{ key: "main", name: d.local.name, online: true, updates: hs && hs.updates, upgrade: f.upgrade.main, local: true }]
     .concat(d.nodes.map((n) => ({ key: `node:${n.id}`, id: n.id, name: n.name, address: n.address, online: n.online,
+      user: n.data && (n.data.user || ((n.data.host_facts && n.data.host_facts.sessions) || []).map((x) => x.name).find(Boolean)),
       version: n.data && n.data.version, updates: n.data && n.data.updates, upgrade: n.data && n.data.host_facts && n.data.host_facts.upgrade,
       macs: f.macs[`node:${n.id}`] })));
   const pct = (x) => (x ? h("span", { class: x.pct < 99 ? "pill warn" : "" }, `${x.pct}%`) : h("span", { class: "muted" }, "–"));
