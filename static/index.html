@@ -99,6 +99,13 @@
         <div class="right"><button class="btn primary" id="addServerBtn">서버 추가</button></div></div>
       <div class="grid server-cards" id="serverCards"></div>
 
+      <div class="section-title"><h2>서버 관리</h2><span class="sub" id="fleetMeta">가동률 · 디스크 예측 · 패키지 업데이트 · 원격 켜기</span></div>
+      <div class="card table-wrap"><table class="fleet">
+        <thead><tr><th>서버</th><th>에이전트</th><th class="r">가동률 (이번 달)</th><th class="r">지난 달</th><th class="r">끊김</th>
+          <th>디스크 예측</th><th>패키지</th><th class="r"></th></tr></thead>
+        <tbody id="fleetRows"></tbody>
+      </table></div>
+
       <div class="section-title"><h2>웹사이트 감시</h2><span class="sub">2분마다 접속 확인 · 2번 연속 실패하면 알림 (3xx·4xx는 정상으로 봄)</span></div>
       <div class="card">
         <form class="mem-form" id="siteForm">
@@ -247,6 +254,17 @@
           <div class="card grow" id="auditView"></div>
         </div>
       </div>
+      <div class="section-title"><h2>AI 보안 조사</h2><span class="sub" id="caseMeta"></span></div>
+      <div class="card">
+        <form class="mem-form" id="caseForm">
+          <input class="input" id="caseInput" maxlength="200" placeholder="직접 조사 요청 — 예) 45.33.32.156 이 IP 뭐 하는 곳이야? · 서브서버 1 SSH 이상 없어?">
+          <button class="btn primary" type="submit">조사 요청</button>
+        </form>
+        <div class="table-wrap"><table>
+          <thead><tr><th>시각</th><th>계기</th><th>서버</th><th>대상</th><th>판단</th><th>조치</th><th class="r">토큰</th><th>평가</th></tr></thead>
+          <tbody id="caseRows"></tbody>
+        </table></div>
+      </div>
       <div class="grid two">
         <div class="ai-col">
           <div class="section-title"><h2>일일 보고서</h2><span class="sub">매일 00:00부터 서버마다 15분 간격 · 30일 보관</span></div>
@@ -291,6 +309,16 @@
             <button class="btn" type="submit">추가</button>
           </form>
           <ul class="mem-list" id="memList"></ul>
+        </div>
+      </div>
+      <div>
+        <div class="section-title"><h2>AI가 배운 것</h2><span class="sub" id="lessonMeta">조사 결과와 관리자 정정에서 쌓임 · 모든 AI 판단에 반영</span></div>
+        <div class="card">
+          <form class="mem-form" id="lessonForm">
+            <input class="input" id="lessonInput" maxlength="300" placeholder="정정·규칙 추가 — 예) tcp/3000 은 내 개발 서버라 정상">
+            <button class="btn" type="submit">추가</button>
+          </form>
+          <ul class="mem-list" id="lessonList"></ul>
         </div>
       </div>
       <div>
@@ -402,6 +430,12 @@
     <div class="card table-wrap"><table>
       <thead><tr><th>IP / 대역</th><th>국가</th><th>차단 시각</th><th class="r">실패</th><th>사유</th><th>User-Agent</th><th class="r"></th></tr></thead>
       <tbody id="bans"></tbody>
+    </table></div>
+
+    <div class="section-title"><h2>설정 변경 감지</h2><span class="sub">매시간 사용자·sudo·SSH 키·cron·부팅 서비스·SSH 설정·열린 포트를 비교 · 바뀌면 AI가 조사</span></div>
+    <div class="card table-wrap"><table>
+      <thead><tr><th>시각</th><th>서버</th><th>변경 내용</th></tr></thead>
+      <tbody id="integrityRows"></tbody>
     </table></div>
 
     <div class="section-title"><h2>보안 알림</h2><span class="sub" id="alertChannels"></span></div>

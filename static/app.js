@@ -474,7 +474,9 @@ $("nextPage").addEventListener("click", () => { accessPage++; loadAccess(); });
 const ALERT_KIND = { new_ip: ["새 IP 로그인", "warn"], login_fail: ["로그인 실패", "crit"], ban: ["영구 차단", "crit"], unban: ["차단 해제", "good"],
   ai_fix: ["AI 자동 조치", "good"], needs_you: ["직접 확인 필요", "crit"], node_down: ["서버 끊김", "crit"], node_up: ["서버 복구", "good"], node_hot: ["원격 고부하", "warn"],
   power: ["전원 조작", "warn"], site_down: ["사이트 다운", "crit"], site_up: ["사이트 복구", "good"],
-  login_risk: ["수상한 로그인", "crit"], ai_risk: ["AI 위험 감지", "warn"] };
+  login_risk: ["수상한 로그인", "crit"], ai_risk: ["AI 위험 감지", "warn"],
+  config_change: ["설정 변경", "warn"], disk_forecast: ["디스크 예측", "warn"], monthly: ["월간 가동률", ""],
+  upgrade: ["업그레이드", ""], ai_case: ["AI 조사", "crit"] };
 
 async function unbanIp(b) {
   if (!(await confirmDialog("차단 해제", `${b.key} 의 영구 차단을 풀까요? 실패 횟수도 0으로 초기화됩니다.`, false))) return;
@@ -539,6 +541,7 @@ async function loadSecurity() {
   if (currentNode != null) return renderNodeSecurity(await currentNodeData());
 
   api("/api/hostblock").then((r) => renderHostBlocks("l", r.installed ? r.blocked : null, null)).catch(() => {});
+  loadIntegrity().catch(() => {});
   loadAiActions().catch(() => {});
   const [{ sessions }, me, { bans }, alertRows] = await Promise.all([api("/api/sessions"), api("/api/me"), api("/api/bans"), loadAlertBadge()]);
   $("banRule").textContent = `신뢰 IP가 아닌 곳에서 비밀번호를 ${me.ban_after}번 틀리면 영구 차단 · IPv6는 /64 대역 단위`;
@@ -792,7 +795,7 @@ function gauge(title, pct, sub) {
     h("div", { class: "muted gauge-sub" }, sub));
 }
 
-const jobName = (t) => t.replace(/\s*(생성|작성|판단|답하는)?\s*중$/, "").replace(/질문에$/, "질문 답변");
+const jobName = (t) => t.replace(" 중 · ", " · ").replace(/\s*(생성|작성|판단|답하는)?\s*중$/, "").replace(/질문에$/, "질문 답변");
 
 function renderAiUsage(st) {
   const u = st.usage, now = (st.server_now || Date.now() / 1000);
@@ -814,6 +817,7 @@ function renderAiUsage(st) {
     h("b", { class: "num" }, ts <= now ? "곧" : fmtWhen(ts))) : null;
   put($("aiSched"), h("span", { class: "muted" }, "다음 예정"),
     chip(`위험 감지 (${st.briefing_hours}시간마다)`, n.regular), chip("일일 보고서", n.daily), chip("보안 점검 (매주)", n.audit),
+    st.budget && st.budget !== "ok" ? h("span", { class: "pill warn" }, BUDGET[st.budget]) : null,
     u.limits && u.limits.checked ? h("span", { class: "muted sched-note" }, `사용량 기준 ${fmtWhen(u.limits.checked)}`) : null);
   fill($("aiJobs"), u.recent.map((r) => h("tr", {},
     h("td", { class: "num" }, fmtWhen(r.ts)),
@@ -956,6 +960,164 @@ async function loadMemory() {
 }
 $("memForm").addEventListener("submit", (e) => { e.preventDefault(); const v = $("memInput").value.trim(); if (v) { $("memInput").value = ""; remember(v); } });
 
+// ---------------------------------------------------------------- AI security investigations + lessons
+
+const CASE_KIND = { config_change: "설정 변경", ssh_login: "SSH 로그인", login_risk: "수상한 로그인", manual: "직접 요청" };
+const VERDICT = { benign: ["정상", "good"], suspicious: ["확인 필요", "warn"], malicious: ["공격", "crit"], unknown: ["판단 보류", ""] };
+const TOOL_LABEL = { ip_history: "IP 접속 기록", ip_across_servers: "전체 서버에서 IP 확인", server_state: "서버 상태", service_logs: "서비스 로그",
+  recent_web_attacks: "최근 웹 공격", past_cases: "지난 조사 검색", block_ip: "IP 차단", restart_service: "서비스 재시작" };
+function casePill(c) {
+  if (c.status === "queued") return h("span", { class: "pill" }, "대기");
+  if (c.status === "running") return h("span", { class: "pill warn" }, "조사 중");
+  if (c.status === "failed") return h("span", { class: "pill crit" }, "실패");
+  const [l, cls] = VERDICT[c.verdict] || [c.verdict, ""];
+  return h("span", { class: `pill ${cls}` }, l);
+}
+const BUDGET = { save: "토큰 절약 중 — 긴급한 조사만", stop: "사용량 한도 근접 — AI 작업 일시 중지" };
+
+async function loadCases() {
+  const r = await api("/api/ai/cases");
+  put($("caseMeta"), `오늘 ${r.today}/${r.daily_cap}건 · 배운 것 ${r.lessons}개 · 한 건 최대 ${r.max_steps}단계`,
+    r.budget !== "ok" ? h("span", { class: "pill warn" }, BUDGET[r.budget]) : null);
+  fill($("caseRows"), r.cases.map((c) => h("tr", { class: "clickable", onclick: () => openCase(c.id) },
+    h("td", { class: "num" }, fmtWhen(c.ts)), h("td", {}, CASE_KIND[c.kind] || c.kind), h("td", {}, c.server || "중앙"),
+    h("td", { class: "ellipsis" }, c.subject), h("td", {}, casePill(c)),
+    h("td", {}, c.actions.length ? c.actions.map((a) => `${TOOL_LABEL[a.type] || a.type}${a.ok ? "" : "(거부)"}`).join(", ") : "–"),
+    h("td", { class: "r num" }, c.tokens ? fmtTok(c.tokens) : "–"),
+    h("td", {}, c.feedback === "good" ? "👍 맞음" : c.feedback === "bad" ? "👎 오판" : c.status === "done" ? h("span", { class: "muted" }, "평가하기") : ""))),
+    8, "아직 조사 기록이 없습니다. 설정 변경·처음 보는 SSH 로그인·수상한 로그인이 생기면 AI가 스스로 조사합니다.");
+}
+
+async function openCase(id) {
+  let c;
+  try { c = await api(`/api/ai/cases/${id}`); } catch (err) { toast(err.message, true); return; }
+  const note = h("input", { class: "input", maxlength: "300", placeholder: "오판이면 이유 (예: 내가 설치한 프로그램이야)" });
+  const rate = (good) => async () => {
+    try { await post(`/api/ai/cases/${id}/feedback`, { good, note: note.value }); toast(good ? "평가했습니다." : "정정을 AI가 배웠습니다. 다음 판단부터 반영돼요."); $("reportModal").close(); loadCases(); loadLessons(); }
+    catch (err) { toast(err.message, true); }
+  };
+  const [vl, vc] = VERDICT[c.verdict] || ["", ""];
+  put($("reportBody"),
+    h("div", { class: "modal-head" }, h("h3", {}, `AI 보안 조사 #${c.id} · ${CASE_KIND[c.kind] || c.kind}`),
+      h("button", { class: "btn", type: "button", onclick: () => $("reportModal").close() }, "닫기")),
+    h("div", { class: "muted" }, `${fmtDateTime(c.ts)} · ${c.server || "중앙서버"} · 토큰 ${fmtTok(c.tokens || 0)}`),
+    h("div", { class: "case-subject" }, c.detail),
+    c.status === "done" ? h("div", { class: "case-verdict" }, h("span", { class: `pill ${vc}` }, vl), h("p", { class: "brief-summary" }, ...md(c.summary || ""))) :
+      h("p", { class: "muted" }, c.status === "failed" ? c.summary : "조사 대기·진행 중입니다."),
+    h("ol", { class: "case-steps" }, c.steps.map((s) => h("li", {},
+      h("div", {}, h("b", {}, TOOL_LABEL[s.tool] || s.tool), " ", h("span", { class: "mono muted" }, Object.values(s.args || {}).join(" · "))),
+      h("div", { class: "ink2" }, s.thought),
+      h("details", {}, h("summary", { class: "muted" }, "조회 결과"), h("pre", { class: "log-view mono" }, s.result))))),
+    c.actions.length ? h("div", { class: "brief-actions" }, h("div", { class: "muted" }, "AI가 한 조치"),
+      c.actions.map((a) => h("div", {}, `${TOOL_LABEL[a.type] || a.type} ${a.target} → ${a.ok ? "완료" : "거부"} (${a.detail || ""})`))) : null,
+    c.lesson ? h("p", { class: "muted ai-note" }, `배운 것: ${c.lesson.text}${c.lesson.active ? "" : " (취소됨)"}`) : null,
+    c.status === "done" ? h("div", { class: "case-feedback" },
+      h("span", { class: "muted" }, c.feedback ? `평가: ${c.feedback === "good" ? "맞음" : "오판"} — 다시 평가할 수 있어요` : "이 판단이 맞았나요? 평가하면 AI가 배웁니다"),
+      note, h("button", { class: "btn", onclick: rate(true) }, "👍 맞음"), h("button", { class: "btn danger", onclick: rate(false) }, "👎 오판")) : null);
+  $("reportModal").showModal();
+}
+
+$("caseForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const v = $("caseInput").value.trim();
+  if (!v) return;
+  try { await post("/api/ai/cases", { subject: v }); $("caseInput").value = ""; toast("조사를 요청했습니다. 순서대로 AI가 조사합니다."); loadCases(); }
+  catch (err) { toast(err.message, true); }
+});
+
+async function loadLessons() {
+  const { lessons, max } = await api("/api/ai/lessons");
+  $("lessonMeta").textContent = `${lessons.length}/${max}개 · 조사 결과와 관리자 정정에서 쌓임 · 모든 AI 판단에 반영`;
+  $("lessonList").replaceChildren(...(lessons.length ? lessons.map((l) => h("li", {},
+    h("div", {}, h("div", {}, l.source === "admin" ? h("span", { class: "pill me" }, "관리자 정정") : null, " ", l.text),
+      h("div", { class: "muted" }, `${fmtDateTime(l.ts)}${l.case_id ? ` · 조사 #${l.case_id}` : ""}${l.uses ? ` · 맞음 ${l.uses}회` : ""}`)),
+    h("button", { class: "btn danger", onclick: async () => {
+      if (!(await confirmDialog("배운 것 지우기", `“${l.text}” 를 잊게 할까요?`, true))) return;
+      await api(`/api/ai/lessons/${l.id}`, { method: "DELETE" }); loadLessons();
+    } }, "삭제"))) : [h("li", { class: "muted" }, "아직 없습니다. AI가 조사를 마치거나, 조사 결과를 ‘오판’으로 평가하면 여기에 쌓입니다.")]));
+}
+$("lessonForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const v = $("lessonInput").value.trim();
+  if (v.length < 8) { toast("8자 이상 적어 주세요.", true); return; }
+  try { await post("/api/ai/lessons", { text: v }); $("lessonInput").value = ""; loadLessons(); } catch (err) { toast(err.message, true); }
+});
+
+// ---------------------------------------------------------------- fleet: uptime, disk forecast, upgrades, wake
+
+const verLt = (a, b) => { const x = (a || "0").split(".").map(Number), y = b.split(".").map(Number); return x[0] < y[0] || (x[0] === y[0] && (x[1] || 0) < (y[1] || 0)); };
+function diskText(f) {
+  if (!f || f.now == null) return h("span", { class: "muted" }, "–");
+  if (f.collecting) return h("span", { class: "muted" }, `${f.now}% · 예측은 하루치 기록 후`);
+  if (f.days_left == null) return h("span", {}, `${f.now}% · 안정적`);
+  return h("span", { class: f.days_left <= 14 ? "pill crit" : f.days_left <= 60 ? "pill warn" : "" },
+    `${f.now}% · 약 ${Math.round(f.days_left)}일 뒤 95% (하루 +${f.per_day}%)`);
+}
+function upgradeText(u, upd) {
+  if (u && u.state === "running") return h("span", { class: "pill warn" }, `업그레이드 중 (${fmtWhen(u.started)}~)`);
+  const base = upd && upd.pending != null ? `대기 ${upd.pending}개${upd.security ? ` · 보안 ${upd.security}` : ""}${upd.reboot_required ? " · 재부팅 필요" : ""}` : "–";
+  if (u && u.finished) return h("span", {}, base, h("div", { class: "muted" }, `${u.state === "done" ? "완료" : "실패"} ${fmtWhen(u.finished)}${u.upgraded ? ` · ${u.upgraded}개 설치` : ""}`));
+  return base;
+}
+function agentUpdateHelp(n, latest) {
+  put($("reportBody"),
+    h("div", { class: "modal-head" }, h("h3", {}, `${n.name} 에이전트 업데이트 (${n.version || "?"} → ${latest})`),
+      h("button", { class: "btn", type: "button", onclick: () => $("reportModal").close() }, "닫기")),
+    h("p", {}, "이 서버(중앙)에서 파일을 복사하고, 그 서버에서 설치 스크립트를 다시 실행하세요. 토큰·설정은 그대로 유지됩니다."),
+    h("pre", { class: "log-view mono" }, `scp -r ~/server-monitor/node_agent <사용자>@${n.address.split(":")[0]}:~/\nssh <사용자>@${n.address.split(":")[0]} bash ~/node_agent/install.sh ${DASHBOARD_TS_IP}`),
+    h("p", { class: "muted" }, "방화벽 자동 차단·패키지 업그레이드 버튼을 쓰려면 그 서버에서 한 번: sudo bash ~/node_agent/install-blocker.sh"),
+    h("p", { class: "muted" }, "대시보드가 코드를 원격으로 밀어 넣는 방식은 일부러 만들지 않았습니다 — 토큰이 새면 그 서버에서 아무 코드나 실행되는 통로가 되기 때문입니다."));
+  $("reportModal").showModal();
+}
+async function upgradeServer(r) {
+  if (!(await confirmDialog("패키지 업그레이드", `${r.name} 에서 apt-get update && upgrade 를 실행할까요? (설정 파일은 유지, 패키지 삭제 없음 · 몇 분 걸릴 수 있음)`, false))) return;
+  try { const x = await post("/api/fleet/upgrade", { node: r.id ?? null }); toast(x.detail || "요청했습니다."); setTimeout(() => loadServers().catch(() => {}), 3000); }
+  catch (err) { toast(err.message, true); }
+}
+async function wakeServer(r) {
+  try { const x = await post(`/api/fleet/wake/${r.id}`); toast(`켜기 신호를 보냈습니다 (${x.sent}개). 1~2분 뒤 연결되는지 보세요.`); }
+  catch (err) { toast(err.message, true); }
+}
+
+async function loadFleet(d) {
+  const [f, hs] = await Promise.all([api("/api/fleet"), api("/api/hoststatus").catch(() => null)]);
+  const find = (rows, key) => rows.find((x) => x.server === key);
+  const fc = Object.fromEntries(f.forecast.map((x) => [x.server, x]));
+  const rows = [{ key: "main", name: d.local.name, online: true, updates: hs && hs.updates, upgrade: f.upgrade.main, local: true }]
+    .concat(d.nodes.map((n) => ({ key: `node:${n.id}`, id: n.id, name: n.name, address: n.address, online: n.online,
+      version: n.data && n.data.version, updates: n.data && n.data.updates, upgrade: n.data && n.data.host_facts && n.data.host_facts.upgrade,
+      macs: f.macs[`node:${n.id}`] })));
+  const pct = (x) => (x ? h("span", { class: x.pct < 99 ? "pill warn" : "" }, `${x.pct}%`) : h("span", { class: "muted" }, "–"));
+  fill($("fleetRows"), rows.map((r) => {
+    const t = find(f.uptime.this.rows, r.key), l = find(f.uptime.last.rows, r.key);
+    const outdated = !r.local && verLt(r.version, f.agent_latest);
+    return h("tr", {},
+      h("td", {}, h("b", {}, r.name), " ", h("span", { class: `pill ${r.online ? "good" : r.online === false ? "crit" : ""}` }, r.online ? "켜짐" : r.online === false ? "꺼짐" : "확인 중")),
+      h("td", {}, r.local ? h("span", { class: "muted" }, "중앙") : outdated ?
+        h("button", { class: "btn", title: "업데이트 방법 보기", onclick: () => agentUpdateHelp(r, f.agent_latest) }, `${r.version || "?"} → ${f.agent_latest} 업데이트`) :
+        h("span", { class: "num" }, r.version || "–")),
+      h("td", { class: "r num" }, pct(t)), h("td", { class: "r num" }, pct(l)),
+      h("td", { class: "r num" }, t ? `${t.outages}회${t.longest ? ` · 최장 ${fmtDur(t.longest)}` : ""}` : "–"),
+      h("td", {}, diskText(fc[r.key])), h("td", {}, upgradeText(r.upgrade, r.updates)),
+      h("td", { class: "actions" },
+        r.online ? h("button", { class: "btn", disabled: (r.upgrade && r.upgrade.state === "running") || (!r.local && verLt(r.version, "2.0")),
+          title: !r.local && verLt(r.version, "2.0") ? "에이전트 2.0 이상 필요" : "", onclick: () => upgradeServer(r) }, "업그레이드") : null,
+        !r.local && r.online === false ? h("button", { class: "btn primary", disabled: !r.macs, title: r.macs ? r.macs.map((m) => m.mac).join(", ") : "MAC 주소를 아직 모름 (에이전트 2.0 연결 후 기록)",
+          onclick: () => wakeServer(r) }, "켜기 (WoL)") : null));
+  }), 8, "");
+  $("fleetMeta").textContent = `가동률은 중앙서버 기준으로 매분 기록 · ${f.uptime.this.month} · 디스크는 최근 14일 추세로 예측 · 최신 에이전트 ${f.agent_latest}`;
+  return f;
+}
+
+async function loadIntegrity() {
+  const f = await api("/api/fleet");
+  const base = Object.keys(f.baselines).length;
+  fill($("integrityRows"), f.changes.map((c) => h("tr", {},
+    h("td", { class: "num" }, fmtDateTime(c.ts)), h("td", {}, c.name),
+    h("td", {}, h("ul", { class: "plain" }, c.changes.map((x) => h("li", {}, x)))))), 3,
+    base ? `변경 없음 · 서버 ${base}대의 기준 상태와 비교 중` : "첫 기준 상태를 기록하는 중입니다 (1시간 안)");
+}
+
 let chatsPage = 0, chatsTimer;
 async function loadChats() {
   const d = await api(`/api/ai/chats?${new URLSearchParams({ q: $("chatsQ").value.trim(), page: chatsPage })}`);
@@ -1008,6 +1170,7 @@ async function loadServers() {
     DASHBOARD_TS_IP = d.local.ts_ip;
     $("installCmd").textContent = `bash ~/node_agent/install.sh ${DASHBOARD_TS_IP}`;
   }
+  if (currentNode == null && !$("serverListView").classList.contains("hidden")) loadFleet(d).catch(() => {});
   const local = h("div", { class: "local-wrap" }, serverCard(d.local, true),
     h("button", { class: "link-btn", onclick: (e) => { e.stopPropagation(); editServer(d.local, true); } }, "정보 수정"));
   $("serverCards").replaceChildren(local, ...d.nodes.map((n) => serverCard(n, false)));
@@ -1418,7 +1581,7 @@ $("ndPoweroff").addEventListener("click", () => nodeCache && openPower("poweroff
 
 let activeTab = "overview";
 const TAB_LOADERS = { overview: () => Promise.all([loadStatus(), loadMetrics(), loadEvents(), loadHomeDu()]), servers: loadServers, services: loadServices,
-  network: loadNetwork, ai: () => Promise.all([loadAi(), loadMemory(), loadChats()]), access: loadAccess, security: loadSecurity };
+  network: loadNetwork, ai: () => Promise.all([loadAi(), loadMemory(), loadChats(), loadCases(), loadLessons()]), access: loadAccess, security: loadSecurity };
 
 function selectTab(name) {
   activeTab = name;
@@ -1450,7 +1613,7 @@ setInterval(() => {
     if (tick % 12 === 0) loadEvents().catch(quiet);
   } else if (activeTab === "services" && tick % 2 === 0) loadServices().catch(quiet);
   else if (activeTab === "network" && tick % 2 === 0) loadNetwork().catch(quiet);
-  else if (activeTab === "ai" && tick % 2 === 0) loadAi().catch(quiet);
+  else if (activeTab === "ai" && tick % 2 === 0) { loadAi().catch(quiet); if (aiView === "now") loadCases().catch(quiet); }
   else if ((activeTab === "access" || activeTab === "security") && currentNode != null && tick % 12 === 0)
     TAB_LOADERS[activeTab]().catch(quiet);
   else if (activeTab === "servers") { if (tick % 2 === 0) loadServers().catch(quiet); if (tick % 6 === 0) loadNodeMetrics().catch(quiet); }

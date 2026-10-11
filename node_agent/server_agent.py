@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # hostsec.py ships next to this file
 import hostsec  # noqa: E402
 
-VERSION = "1.9"
+VERSION = "2.0"
 CONFIG_PATH = Path(os.environ.get("AGENT_CONFIG", Path(__file__).resolve().parent / "config.json"))
 UNIT_RE = re.compile(r"^[A-Za-z0-9@._-]+\.service$")
 SAMPLE_INTERVAL = 10
@@ -231,6 +231,7 @@ class Sampler(threading.Thread):
         self._du_t = self._upd_t = 0.0
         self.updates = None
         self._host_t = 0.0
+        self.integrity, self._int_t = None, 0.0
 
     def sample(self):
         now = time.time()
@@ -265,13 +266,17 @@ class Sampler(threading.Thread):
         if now - self._host_t > 60:  # journal/loginctl are slower: once a minute is plenty
             self._host_t = now
             self.host = {"ssh": hostsec.ssh_events(), "sessions": login_sessions(), "security": hostsec.security_facts(),
-                         "power": power_state(), "blocker": hostsec.blocked()}  # None = install-blocker.sh not run
+                         "power": power_state(), "blocker": hostsec.blocked(),  # None = install-blocker.sh not run
+                         "macs": hostsec.macs(), "upgrade": hostsec.upgrade_status()}
 
     def run(self):
         while True:
             if time.time() - self._upd_t > 3600:  # apt list: hourly is plenty
                 self._upd_t = time.time()
                 threading.Thread(target=lambda: setattr(self, "updates", hostsec.update_status()), daemon=True).start()
+            if time.time() - self._int_t > 3600:
+                self._int_t = time.time()
+                threading.Thread(target=lambda: setattr(self, "integrity", hostsec.integrity_snapshot()), daemon=True).start()
             if time.time() - self._du_t > 3600:
                 self._du_t = time.time()
                 threading.Thread(target=lambda: setattr(self, "du", home_du()), daemon=True).start()
@@ -489,7 +494,8 @@ class Handler(BaseHTTPRequestHandler):
                                     "kernel": os.uname().release, "uptime": up, "boot_time": time.time() - up,
                                     "cpu_count": os.cpu_count(), "now": sampler.latest, "services": services(),
                                     "scope": SCOPE, "host_facts": sampler.host, "home_du": sampler.du,
-                                    "updates": sampler.updates, "backups": list_backups()})
+                                    "updates": sampler.updates, "backups": list_backups(),
+                                    "integrity": sampler.integrity})
         m = re.fullmatch(r"/v1/logs/([A-Za-z0-9@._-]+\.service)(?:\?lines=(\d+))?", self.path)
         if m:  # this user's units come from the user journal, everything else from the system journal
             unit = m.group(1)
@@ -500,6 +506,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.authorized():
             return self.reply(403, {"detail": "forbidden"})
+        if self.path == "/v1/upgrade":  # fixed apt-get update+upgrade, run by the root sm-block service
+            ok, msg = hostsec.request_upgrade()
+            print(f"apt upgrade requested from {self.client_address[0]} -> {ok}", flush=True)
+            return self.reply(200 if ok else 409, {"ok": True, "detail": msg} if ok else {"detail": msg})
+        if self.path == "/v1/wake":  # relay a Wake-on-LAN packet onto this server's LAN
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n)) if 0 < n <= 512 else {}
+                sent = hostsec.wake(str(body.get("mac", "")))
+            except ValueError as e:
+                return self.reply(400, {"detail": str(e) if "MAC" in str(e) else "bad request"})
+            return self.reply(200, {"ok": True, "sent": sent})
         b = re.fullmatch(r"/v1/backup/([a-z0-9-]+-\d{8}\.(?:db|json))", self.path)
         if b:  # dashboard backup copy (off-machine), sent over Tailscale
             n = int(self.headers.get("Content-Length") or 0)

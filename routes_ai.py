@@ -197,7 +197,8 @@ async def ai_status(request: Request, node: int | None = None):
     for a, r in zip(audits, db("SELECT content FROM ai_reports WHERE trigger = '보안점검' ORDER BY id DESC LIMIT 12")):
         a["score"] = json.loads(r["content"]).get("score")
     return {**health, "reports": reports, "daily": daily, "audits": audits, "server_now": time.time(),
-            "usage": await asyncio.to_thread(analyst.usage_summary) if agent.BACKEND == "claude" else None}
+            "usage": await asyncio.to_thread(analyst.usage_summary) if agent.BACKEND == "claude" else None,
+            "budget": agent.budget_level()}
 
 
 @router.get("/api/ai/report/{rid}")
@@ -304,6 +305,10 @@ async def assess_new_login(ip: str, country: str, ua: str, email: str | None):
         await asyncio.to_thread(raise_alert, "login_risk", ip, country,
                                 f"AI 판단: 위험도 {'높음' if r['risk'] == 'high' else '중간'} — {r.get('reason', '')[:250]}\n"
                                 "본인이 아니면 보안 탭 › 활성 세션에서 끊고 IP를 차단하세요.")
+        import secops  # lazy: secops imports this module
+        await asyncio.to_thread(secops.open_case, "login_risk", "", ip,
+                                f"처음 보는 IP 로그인을 AI가 위험도 {r['risk']}로 판단: {r.get('reason', '')[:300]} · 국가 {country or '?'}",
+                                "high" if r["risk"] == "high" else "medium")
 
 
 class ChatTurn(BaseModel):

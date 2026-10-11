@@ -442,3 +442,18 @@ td.nowrap { white-space: nowrap; }
 .scroll-y thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; padding-top: 14px; }
 #aiActions td:nth-child(-n+2), #aiActions td:nth-child(4), #aiActions td:nth-child(5),
 #alerts td:nth-child(-n+2), #alerts td:nth-child(4) { white-space: nowrap; }
+.case-subject { white-space: pre-wrap; background: var(--surface-2); border-radius: 8px; padding: 8px 12px; margin: 10px 0; font-size: 13px; }
+.case-verdict { display: flex; gap: 10px; align-items: flex-start; margin: 8px 0 4px; }
+.case-verdict .pill { margin-top: 3px; }
+.case-steps { margin: 12px 0 0; padding-left: 22px; display: grid; gap: 10px; }
+.case-steps li { padding-left: 4px; }
+.case-steps details summary { cursor: pointer; font-size: 12.5px; margin-top: 2px; }
+.case-steps .log-view { max-height: 240px; }
+.case-feedback { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
+.case-feedback .input { flex: 1; min-width: 200px; }
+.case-feedback .btn + .btn { margin-left: 0; }
+ul.plain { margin: 0; padding-left: 16px; }
+table.fleet td { vertical-align: top; }
+table.fleet td.actions { display: flex; gap: 6px; justify-content: flex-end; }
+#caseForm { margin-bottom: 10px; }
+.mem-list .btn { white-space: nowrap; flex: none; }

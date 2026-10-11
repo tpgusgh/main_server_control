@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# One-time (sudo): install sm-block so the dashboard/AI can auto-block attacker IPs on this machine.
+# One-time (sudo): install sm-block so the dashboard/AI can auto-block attacker IPs on this machine
+# and run "apt-get upgrade" when you press the button (re-run after updating to get new features).
 # No sudo rights are handed out: the user may only drop request files into /var/lib/sm-block/requests,
 # and a root systemd path unit runs sm-block, which re-checks every IP (never LAN/Tailscale/your SSH IP).
 #   sudo bash ~/node_agent/install-blocker.sh                 (on a node)
@@ -34,6 +35,7 @@ Description=sm-block: handle block/unblock requests from the dashboard
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/sm-block process
+TimeoutStartSec=2h
 UNIT
 cat > /etc/systemd/system/sm-block-queue.path <<UNIT
 [Unit]

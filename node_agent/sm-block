@@ -10,6 +10,7 @@ so automation can never lock you out. The table is separate from ufw and restore
   sm-block del <ip|key>        unblock
   sm-block list                JSON list
   sm-block process             handle queued requests (sm-block-queue.service)
+                               ("upgrade" requests run apt-get update + upgrade; no arguments accepted)
   sm-block restore             re-apply saved list (boot)
 """
 import ipaddress
@@ -67,12 +68,20 @@ table inet sm_block {{
         sys.exit("nft 오류: " + r.stderr.strip())
 
 
-def write_public(d: dict, results: dict):
+def old_upgrade():
+    try:
+        with open(PUBLIC) as f:
+            return json.load(f).get("upgrade")
+    except (OSError, ValueError):
+        return None
+
+
+def write_public(d: dict, results: dict, upgrade=None):
     keep = dict(sorted(results.items(), key=lambda kv: -kv[1]["ts"])[:50])
     tmp = PUBLIC + ".tmp"
     with open(tmp, "w") as f:
         json.dump({"blocked": [{"key": k, **v} for k, v in sorted(d.items(), key=lambda kv: -kv[1]["ts"])],
-                   "results": keep}, f)
+                   "results": keep, "upgrade": upgrade if upgrade is not None else old_upgrade()}, f)
     os.chmod(tmp, 0o644)
     os.replace(tmp, PUBLIC)
 
@@ -131,9 +140,31 @@ def key_for(ip: str) -> str:
     return str(a) if a.version == 4 else str(ipaddress.ip_network(f"{a}/64", strict=False))
 
 
+def run_upgrade(d: dict, results: dict):
+    """Fixed command, fixed options: keep existing config files, never remove packages (upgrade, not dist-upgrade)."""
+    started = int(time.time())
+    write_public(d, results, {"state": "running", "started": started})
+    env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "DEBIAN_FRONTEND": "noninteractive", "LANG": "C"}
+    log, rc = "", 0
+    for cmd in (["apt-get", "update", "-q"],
+                ["apt-get", "upgrade", "-y", "-q", "-o", "Dpkg::Options::=--force-confold",
+                 "-o", "Dpkg::Options::=--force-confdef"]):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=3600)
+            rc, log = r.returncode, log + r.stdout[-3000:] + r.stderr[-1500:]
+        except subprocess.TimeoutExpired:
+            rc, log = 124, log + "\n시간 초과 (1시간)"
+        if rc:
+            break
+    upgraded = sum(1 for l in log.splitlines() if l.startswith("Unpacking "))
+    write_public(d, results, {"state": "done" if rc == 0 else "failed", "started": started, "finished": int(time.time()),
+                              "rc": rc, "upgraded": upgraded, "reboot_required": os.path.exists("/var/run/reboot-required"),
+                              "log": log[-2500:]})
+
+
 def process(d: dict):
     """Handle queued request files (written by the unprivileged user). Each is validated, then deleted."""
-    results, changed = old_results(), False
+    results, changed, upgrade = old_results(), False, False
     names = sorted(n for n in os.listdir(QUEUE) if n.endswith(".json"))[:50]
     for name in names:
         path, rid = os.path.join(QUEUE, name), name[:-5]
@@ -146,6 +177,11 @@ def process(d: dict):
                 msg = do_add(d, str(req.get("ip", "")), str(req.get("reason", "")))
             elif req.get("op") == "del":
                 msg = do_del(d, str(req.get("key", "")))
+            elif req.get("op") == "upgrade":
+                prev = old_upgrade() or {}
+                if prev.get("state") == "running" and time.time() - prev.get("started", 0) < 7200:
+                    raise ValueError("이미 업그레이드 중입니다")
+                upgrade, msg = True, "업그레이드 시작"
             else:
                 raise ValueError("알 수 없는 요청")
             results[rid] = {"ok": True, "msg": msg, "ts": int(time.time())}
@@ -161,6 +197,8 @@ def process(d: dict):
         apply(d)
         save(d)
     write_public(d, results)
+    if upgrade:
+        run_upgrade(d, results)
 
 
 def main(argv):

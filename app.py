@@ -23,7 +23,7 @@ from routes_ai import analyst
 async def lifespan(_app):
     await asyncio.to_thread(sampler.sample)
     tasks = [asyncio.create_task(sampler_loop()), asyncio.create_task(analyst.loop()), asyncio.create_task(hub.loop()),
-             asyncio.create_task(sites.loop())]
+             asyncio.create_task(sites.loop()), asyncio.create_task(fleet.loop()), asyncio.create_task(secops.loop())]
     yield
     for t in tasks:
         t.cancel()
@@ -171,9 +171,13 @@ import routes_ai  # noqa: E402
 import routes_auth  # noqa: E402
 import routes_nodes  # noqa: E402
 import sites  # noqa: E402
+import fleet  # noqa: E402
+import secops  # noqa: E402
 
 app.include_router(monitor.router)
 app.include_router(routes_auth.router)
 app.include_router(routes_nodes.router)
 app.include_router(routes_ai.router)
 app.include_router(sites.router)
+app.include_router(fleet.router)
+app.include_router(secops.router)

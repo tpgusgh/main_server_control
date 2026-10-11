@@ -368,3 +368,32 @@ class SecurityAgent(unittest.TestCase):
         a._backoff[("audit",)] = 0
         a.db("UPDATE ai_reports SET ts=?", (int(time.time()) - agent.AUDIT_EVERY - 1,))
         self.assertTrue(a.audit_due())
+
+
+class FleetLogic(unittest.TestCase):
+    def test_integrity_diff_names_added_and_removed(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "node_agent"))
+        import hostsec
+        old = {"ssh_keys": ["aa me@laptop"], "ports": ["tcp/22"], "sshd_config": "x1", "users": ["a(uid 1000)"]}
+        new = {"ssh_keys": ["aa me@laptop", "bb evil@x"], "ports": [], "sshd_config": "x2", "users": ["a(uid 1000)"]}
+        out = hostsec.integrity_diff(old, new)
+        self.assertIn("SSH 공개키 추가: bb evil@x", out)
+        self.assertIn("외부에서 열린 포트 제거: tcp/22", out)
+        self.assertIn("SSH 서버 설정 변경됨", out)
+        self.assertEqual(len(out), 3)
+        self.assertEqual(hostsec.integrity_diff(old, {}), [], "missing fields (old agent) are not changes")
+        with self.assertRaises(ValueError):
+            hostsec.wake("not-a-mac")
+
+    def test_budget_level_saves_tokens_near_the_limit(self):
+        prev, agent.BACKEND = agent.BACKEND, "claude"
+        self.addCleanup(setattr, agent, "BACKEND", prev)
+        future = time.time() + 3600
+        for five, week, want in ((0.5, 0.1, "ok"), (0.92, 0.1, "save"), (0.5, 0.96, "save"), (0.98, 0.1, "stop")):
+            agent.CLAUDE_LIMITS.clear()
+            agent.CLAUDE_LIMITS["unifiedWindows"] = {"five_hour": {"utilization": five, "resetsAt": future},
+                                                     "seven_day": {"utilization": week}}
+            self.assertEqual(agent.budget_level(), want, (five, week))
+        agent.CLAUDE_LIMITS["unifiedWindows"]["five_hour"]["resetsAt"] = time.time() - 1
+        self.assertEqual(agent.budget_level(), "ok", "window already reset")
+        agent.CLAUDE_LIMITS.clear()
