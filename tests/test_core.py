@@ -436,3 +436,13 @@ class Exposure(unittest.TestCase):
                          ("fd7a:115c:a1e0::1", False), ("192.168.0.5", False), ("127.0.0.1", False), ("::1", False),
                          ("fe80::1%eth0", False)):
             self.assertEqual(hostsec.exposed(ip), want, ip)
+
+
+class AptPhasing(unittest.TestCase):
+    def test_phased_packages_are_parsed(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "node_agent"))
+        import hostsec
+        sim = ("Calculating upgrade...\nThe following upgrades have been deferred due to phasing:\n"
+               "  libopeniscsiusr open-iscsi\n0 upgraded, 0 newly installed, 0 to remove and 2 not upgraded.\n")
+        self.assertEqual(hostsec.phased_packages(sim), ["libopeniscsiusr", "open-iscsi"])
+        self.assertEqual(hostsec.phased_packages("0 upgraded"), [])

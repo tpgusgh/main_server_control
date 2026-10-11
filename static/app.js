@@ -535,7 +535,7 @@ function fillHostStatus() {
 function updatesText(u) {
   if (!u) return "확인 중…";
   if (u.pending == null) return "apt 상태를 읽지 못했습니다";
-  return `대기 ${u.pending}개 (보안 ${u.security}개) · 자동 보안 업데이트 ${u.auto_security ? "켜짐" : "꺼짐"}${u.reboot_required ? " · ⚠ 재부팅 필요" : ""}`;
+  return `대기 ${u.pending}개 (보안 ${u.security}개)${u.phased ? ` · 단계적 배포 대기 ${u.phased}개(자동 설치 예정)` : ""} · 자동 보안 업데이트 ${u.auto_security ? "켜짐" : "꺼짐"}${u.reboot_required ? " · ⚠ 재부팅 필요" : ""}`;
 }
 async function loadSecurity() {
   toggleRemote("sec", currentNode != null);
@@ -1058,7 +1058,7 @@ function diskText(f) {
 }
 function upgradeText(u, upd) {
   if (u && u.state === "running") return h("span", { class: "pill warn" }, `업그레이드 중 (${fmtWhen(u.started)}~)`);
-  const base = upd && upd.pending != null ? `대기 ${upd.pending}개${upd.security ? ` · 보안 ${upd.security}` : ""}${upd.reboot_required ? " · 재부팅 필요" : ""}` : "–";
+  const base = upd && upd.pending != null ? `대기 ${upd.pending}개${upd.security ? ` · 보안 ${upd.security}` : ""}${upd.phased ? ` · 단계적 배포 ${upd.phased}` : ""}${upd.reboot_required ? " · 재부팅 필요" : ""}` : "–";
   if (u && u.finished) return h("span", {}, base, h("div", { class: "muted" }, `${u.state === "done" ? "완료" : "실패"} ${fmtWhen(u.finished)}${u.upgraded ? ` · ${u.upgraded}개 설치` : ""}`));
   return base;
 }

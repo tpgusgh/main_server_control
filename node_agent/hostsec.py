@@ -139,6 +139,20 @@ def delete_user_unit(unit: str, unit_dir, systemctl):
     return True, f"휴지통으로 옮김: {dst} (되살리기: mv 로 원래 자리에 두고 systemctl --user daemon-reload)"
 
 
+def phased_packages(sim: str) -> list[str]:
+    """Packages Ubuntu deliberately holds back for staged rollout ('deferred due to phasing'); they install
+    by themselves in a few days, so they aren't 'pending' work."""
+    out, inside = [], False
+    for line in sim.splitlines():
+        if "deferred due to phasing" in line:
+            inside = True
+        elif inside and line.startswith(" "):
+            out += line.split()
+        else:
+            inside = False
+    return out
+
+
 def update_status():
     """Live apt state (no root needed). The update-notifier text file goes stale, so it isn't used."""
     import os
@@ -148,13 +162,17 @@ def update_status():
         r = subprocess.run(["apt", "list", "--upgradable"], capture_output=True, text=True, timeout=90,
                            env={**os.environ, "LANG": "C"})
         lines = [l for l in r.stdout.splitlines() if "[upgradable" in l]
+        sim = subprocess.run(["apt-get", "-s", "-q", "upgrade"], capture_output=True, text=True, timeout=90,
+                             env={**os.environ, "LANG": "C"}).stdout
+        phased = set(phased_packages(sim))
+        lines = [l for l in lines if l.split("/")[0] not in phased]
     except (OSError, subprocess.SubprocessError):
-        lines = None
+        lines, phased = None, set()
     try:
         auto = 'Unattended-Upgrade "1"' in Path("/etc/apt/apt.conf.d/20auto-upgrades").read_text()
     except OSError:
         auto = False
-    return {"ts": int(time.time()), "pending": None if lines is None else len(lines),
+    return {"ts": int(time.time()), "pending": None if lines is None else len(lines), "phased": len(phased),
             "security": None if lines is None else sum(1 for l in lines if "-security" in l.split()[0]),
             "auto_security": auto, "reboot_required": Path("/var/run/reboot-required").exists()}
 
