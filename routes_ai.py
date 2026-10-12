@@ -26,7 +26,7 @@ router = APIRouter()
 # Auto-fix executors. Each re-checks its own precondition right before acting, so the model can only
 # pick among fixes the rules already justify; nothing here opens ports, unbans, or stops services.
 def _fix_restart_local(unit: str):
-    if unit not in managed_units() or unit == "llm.service":
+    if unit not in managed_units():
         return False, "허용되지 않은 서비스"
     if _systemctl("show", unit, "-p", "ActiveState", "--value").stdout.strip() != "failed":
         return False, "이미 정상 상태"
@@ -197,7 +197,7 @@ async def ai_status(request: Request, node: int | None = None):
     for a, r in zip(audits, db("SELECT content FROM ai_reports WHERE trigger = '보안점검' ORDER BY id DESC LIMIT 12")):
         a["score"] = json.loads(r["content"]).get("score")
     return {**health, "reports": reports, "daily": daily, "audits": audits, "server_now": time.time(),
-            "usage": await asyncio.to_thread(analyst.usage_summary) if agent.BACKEND == "claude" else None,
+            "usage": await asyncio.to_thread(analyst.usage_summary),
             "budget": agent.budget_level()}
 
 
@@ -233,7 +233,7 @@ async def ai_briefing(request: Request, body: BriefBody | None = None):
     if analyst.lock.locked() or (_briefing_task and not _briefing_task.done()):
         raise HTTPException(409, f"AI가 이미 작업 중입니다 ({analyst.busy or '대기'}).")
     if not (await analyst.health())["online"]:
-        raise HTTPException(503, "AI 서버(llm.service)가 꺼져 있습니다.")
+        raise HTTPException(503, "AI를 사용할 수 없습니다 (.env 의 SM_CLAUDE_OAUTH_TOKEN 확인).")
     request.state.event = "ai"
     request.state.detail = "briefing"
     _briefing_task = asyncio.create_task(analyst.briefing("수동", node))
@@ -329,7 +329,7 @@ async def ai_chat(request: Request, body: ChatBody):
     if s["id"] in _chatting:
         raise HTTPException(429, "이전 질문의 답변이 끝난 뒤 다시 시도하세요.")
     if not (await analyst.health())["online"]:
-        raise HTTPException(503, "AI 서버(llm.service)가 꺼져 있습니다.")
+        raise HTTPException(503, "AI를 사용할 수 없습니다 (.env 의 SM_CLAUDE_OAUTH_TOKEN 확인).")
     request.state.event = "ai"
     request.state.detail = body.question[:100]
     _chatting.add(s["id"])

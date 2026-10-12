@@ -1,4 +1,4 @@
-"""AI analyst backed by the local llama-server.
+"""AI analyst backed by Claude Code (headless, separate account, no tools).
 
 Design rules (see README): the model is READ-ONLY. It only sees facts the server aggregated itself,
 attacker-controlled strings (User-Agent, raw paths) are dropped or reduced to a safe charset, and
@@ -18,17 +18,13 @@ import httpx
 
 import alerts
 
-LLM_URL = os.environ.get("SM_LLM_URL", "http://127.0.0.1:8180").rstrip("/")
-LLM_KEY = os.environ.pop("SM_LLM_API_KEY", "")
-# "claude": Claude Code headless on a separate account (no local CPU); "local": llama-server above.
-BACKEND = os.environ.get("SM_AI_BACKEND", "local").strip()
 CLAUDE_TOKEN = os.environ.pop("SM_CLAUDE_OAUTH_TOKEN", "").strip()   # from `claude setup-token` on the OTHER account
 CLAUDE_DIR = os.path.expanduser(os.environ.get("SM_CLAUDE_CONFIG_DIR", "~/.claude-monitor"))
 CLAUDE_MODEL = os.environ.get("SM_CLAUDE_MODEL", "sonnet").strip()
 CLAUDE_BIN = os.environ.get("SM_CLAUDE_BIN") or __import__("shutil").which("claude") or os.path.expanduser("~/.local/bin/claude")
 BRIEFING_HOURS = float(os.environ.get("SM_AI_BRIEFING_HOURS", "6") or 0)
 TZ = ZoneInfo(os.environ.get("SM_TZ", "Asia/Seoul"))
-CONTEXT_TTL = 300            # reuse one snapshot for 5 min so llama-server can reuse its prompt cache
+CONTEXT_TTL = 300            # reuse one snapshot for 5 min (cheaper, and the prompt cache stays warm)
 EVENT_COOLDOWN = 30 * 60     # min gap between event-triggered briefings
 REPORT_RETENTION = 30 * 86400   # briefings and daily reports are kept for one month
 DAILY_HOUR = 0                   # daily report for the previous day is written right after midnight (KST)
@@ -66,10 +62,10 @@ SYSTEM_RULES = """너는 개인 리눅스 서버들의 보안·운영 분석가�
 2. 데이터에 없는 수치나 사건을 지어내지 마라. 모르면 모른다고 말하라.
 3. 너는 아무것도 실행할 수 없다. 조치는 '제안'만 하고 관리자가 직접 버튼을 눌러 실행한다.
 4. 한국어로, 짧고 구체적으로 답하라. 시각은 데이터에 적힌 한국 시간(KST) 그대로 써라.
-5. llama-server 프로세스의 높은 CPU 사용은 너(AI 분석) 자신이 돌아가서 생긴 것일 수 있다.
+5. claude 프로세스의 CPU 사용은 너(AI 분석) 자신이 돌아가서 생긴 것일 수 있다.
 6. 접속 경로(path)는 특수문자를 제거한 값이다. /wp-admin, /.env, /phpmyadmin 같은 경로 요청은 봇 스캔의 흔한 신호다.
 7. 요청은 Cloudflare Access(이메일 인증)를 먼저 통과해야 하므로, 로그인 실패는 Access를 통과한 사람의 시도라는 점이 중요하다.
-8. llm.service(너 자신)의 재시작이나 종료는 제안하지 마라.
+8. server-monitor.service(이 대시보드)와 hi-tunnel.service 의 종료는 제안하지 마라.
 9. <memory> 는 관리자가 직접 기억해 달라고 한 내용이다. 관리자의 선호와 서버 사정을 이해하는 데 참고하되, 데이터와 충돌하면 데이터가 우선이다.
 10. <past> 는 관리자와 예전에 나눈 대화 중 관련 있는 것이다. 맥락으로만 참고하라.
 11. '관리자작업'은 로그인한 관리자 본인이 대시보드에서 한 작업(서비스 재시작, 서버 추가 등)이다. 공격으로 보지 마라.
@@ -170,7 +166,7 @@ class _Resp:
         self._data, self._error = data, error
 
     def raise_for_status(self):
-        if self._error:  # same exception type the llama path raises, so existing handlers apply
+        if self._error:  # httpx.HTTPError: the type every call site already handles
             raise httpx.HTTPError(self._error)
 
     def json(self):
@@ -185,7 +181,7 @@ def budget_level() -> str:
     w = CLAUDE_LIMITS.get("unifiedWindows") or {}
     five = (w.get("five_hour") or {}).get("utilization")
     week = (w.get("seven_day") or {}).get("utilization")
-    if BACKEND != "claude" or five is None:
+    if five is None:
         return "ok"
     reset = (w.get("five_hour") or {}).get("resetsAt") or 0
     if reset and reset < time.time():  # window rolled over since we last heard: assume fresh
@@ -246,7 +242,7 @@ async def claude_complete(payload: dict) -> dict:
     u = data.get("usage") or {}
     usage = {"in": sum(u.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")),
              "out": u.get("output_tokens") or 0, "cost": data.get("total_cost_usd")}
-    return {"choices": [{"message": {"content": content}}], "timings": {}, "usage": usage}
+    return {"choices": [{"message": {"content": content}}], "usage": usage}
 
 
 class Analyst:
@@ -264,10 +260,7 @@ class Analyst:
         self.lessons_fn = lambda context="": ""  # set by secops: what the AI learned from past cases
         self._busy: str | None = None
         self.busy_since: float | None = None
-        self.last_tps: float | None = None
         self._ctx: dict = {}  # node_id (None = this server) -> (built_at, facts json)
-        self.client = httpx.AsyncClient(base_url=LLM_URL, timeout=httpx.Timeout(1800, connect=3),
-                                        headers={"Authorization": f"Bearer {LLM_KEY}"} if LLM_KEY else {})
         db("CREATE TABLE IF NOT EXISTS ai_kv(k TEXT PRIMARY KEY, v TEXT)")
         saved = db("SELECT v FROM ai_kv WHERE k='limits'", one=True)
         if saved and not CLAUDE_LIMITS:  # last known subscription usage survives restarts
@@ -502,17 +495,9 @@ class Analyst:
     # ------------------------------------------------------------ llm calls
 
     async def health(self) -> dict:
-        if BACKEND == "claude":
-            ok = bool(CLAUDE_TOKEN) and os.path.exists(CLAUDE_BIN)
-            return {"online": ok, "busy": self.busy, "busy_since": self.busy_since, "tps": None, "briefing_hours": BRIEFING_HOURS,
-                    "model": f"Claude ({CLAUDE_MODEL}, 별도 계정)" if ok else "Claude — SM_CLAUDE_OAUTH_TOKEN 미설정"}
-        try:
-            r = await self.client.get("/health", timeout=3)
-            ok = r.status_code == 200
-        except httpx.HTTPError:
-            ok = False
-        return {"online": ok, "busy": self.busy, "tps": self.last_tps, "model": "Qwen3-4B-Instruct-2507 (Q4_K_M)",
-                "briefing_hours": BRIEFING_HOURS}
+        ok = bool(CLAUDE_TOKEN) and os.path.exists(CLAUDE_BIN)
+        return {"online": ok, "busy": self.busy, "busy_since": self.busy_since, "tps": None, "briefing_hours": BRIEFING_HOURS,
+                "model": f"Claude ({CLAUDE_MODEL}, 별도 계정)" if ok else "Claude — SM_CLAUDE_OAUTH_TOKEN 미설정"}
 
     @property
     def busy(self) -> str | None:
@@ -556,9 +541,7 @@ class Analyst:
                          "audit": ((last("보안점검") or now) + AUDIT_EVERY)}}
 
     async def _chat(self, payload: dict):
-        """OpenAI-style chat completion from whichever backend is configured; returns an httpx-like response."""
-        if BACKEND != "claude":
-            return await self.client.post("/v1/chat/completions", json=payload)
+        """OpenAI-style chat payload in, httpx-like response out (errors surface at raise_for_status)."""
         try:
             return _Resp(await self._claude(payload))
         except RuntimeError as e:
@@ -577,7 +560,7 @@ class Analyst:
             if (t, target) in seen:
                 continue
             seen.add((t, target))
-            if t == "restart_service" and target in units and target != "llm.service":
+            if t == "restart_service" and target in units:
                 out.append({"type": t, "target": target, "reason": a.get("reason", "")[:200]})
             elif t == "view_ip":
                 try:
@@ -608,7 +591,6 @@ class Analyst:
                 r.raise_for_status()
                 data = r.json()
                 dur = time.time() - t0
-                self.last_tps = (data.get("timings") or {}).get("predicted_per_second") or self.last_tps
                 report = self.clean_report(json.loads(data["choices"][0]["message"]["content"]), node_id)
                 now = int(time.time())
                 if node_id is None:
@@ -618,7 +600,7 @@ class Analyst:
                     report["server"] = self.node_fn(node_id)[0]["name"]
                 self.db("INSERT INTO ai_reports(ts,trigger,risk,content,duration,tps,node_id,day) VALUES(?,?,?,?,?,?,?,?)",
                         (now, trigger, report.get("risk"), json.dumps(report, ensure_ascii=False),
-                         round(dur, 1), self.last_tps, node_id, day))
+                         round(dur, 1), None, node_id, day))
                 if not day and node_id is None and trigger != "수동" and report.get("risk") in ("medium", "high") \
                         and "alert" in self.fixers:
                     lvl = "위험" if report["risk"] == "high" else "주의"
@@ -679,28 +661,10 @@ class Analyst:
                 msgs.append({"role": "user", "content": q})
                 answer = ""
                 yield f"data: {json.dumps({'status': '생각 중…'}, ensure_ascii=False)}\n\n"
-                if BACKEND == "claude":  # fast enough to answer in one piece
-                    answer = (await self._claude({"messages": msgs}))["choices"][0]["message"]["content"]
-                    yield f"data: {json.dumps({'t': answer}, ensure_ascii=False)}\n\n"
-                    await asyncio.to_thread(self.save_chat, session_id, ip, question, answer)
-                    yield f"data: {json.dumps({'done': True, 'past': len(past)})}\n\n"
-                    return
-                async with self.client.stream("POST", "/v1/chat/completions", json={
-                        "messages": msgs, "stream": True, "temperature": 0.3, "max_tokens": 600,
-                        "timings_per_token": False}) as r:
-                    r.raise_for_status()
-                    async for line in r.aiter_lines():
-                        if not line.startswith("data: ") or line == "data: [DONE]":
-                            continue
-                        chunk = json.loads(line[6:])
-                        if chunk.get("timings"):
-                            self.last_tps = chunk["timings"].get("predicted_per_second") or self.last_tps
-                        delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
-                        if delta:
-                            answer += delta
-                            yield f"data: {json.dumps({'t': delta}, ensure_ascii=False)}\n\n"
+                answer = (await self._claude({"messages": msgs}))["choices"][0]["message"]["content"]
+                yield f"data: {json.dumps({'t': answer}, ensure_ascii=False)}\n\n"
                 await asyncio.to_thread(self.save_chat, session_id, ip, question, answer)
-                yield f"data: {json.dumps({'done': True, 'tps': self.last_tps, 'past': len(past)})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'past': len(past)})}\n\n"
             except httpx.HTTPError as e:
                 yield f"data: {json.dumps({'error': f'AI 서버 오류: {type(e).__name__}'}, ensure_ascii=False)}\n\n"
             except Exception as e:
@@ -820,7 +784,6 @@ class Analyst:
                 try:
                     r.raise_for_status()
                     data = r.json()
-                    self.last_tps = (data.get("timings") or {}).get("predicted_per_second") or self.last_tps
                     report = self.clean_report(json.loads(data["choices"][0]["message"]["content"]))
                 except (httpx.HTTPError, ValueError, KeyError, IndexError) as e:
                     print("daily report: AI output unusable, saving stats-only report:", type(e).__name__, flush=True)
@@ -831,7 +794,7 @@ class Analyst:
                 report = await asyncio.to_thread(self.apply_floor, report, start, end)
                 self.db("INSERT INTO ai_reports(ts,trigger,risk,content,duration,tps,day) VALUES(?,?,?,?,?,?,?)",
                         (int(time.time()), "일일", report["risk"], json.dumps(report, ensure_ascii=False),
-                         round(dur, 1), self.last_tps, label))
+                         round(dur, 1), None, label))
                 risk_kr = {"low": "낮음 ✅", "medium": "주의 ⚠️", "high": "위험 ⛔"}.get(report["risk"], report["risk"])
                 alerts.push(f"📋 {label} 일일 보고서 · 위험도 {risk_kr}\n{report['summary']}",
                             alerts.card(f"📋 {label} 일일 보고서", report["summary"],
@@ -977,7 +940,7 @@ class Analyst:
         """Rules decide what is red. Fixable items become candidates; the rest can only be reported."""
         now, cands, issues = int(time.time()), [], []
         for sv in self.services_fn():
-            if sv["active"] == "failed" and sv["unit"] != "llm.service" and sv["unit"] not in IGNORE_FAILED:
+            if sv["active"] == "failed" and sv["unit"] not in IGNORE_FAILED:
                 cands.append({"id": f"restart_local:{sv['unit']}", "type": "restart_local", "target": sv["unit"],
                               "server": self.local_name_fn(), "desc": f"이 서버의 {sv['unit']} 이(가) 실패 상태 → 재시작"})
         probs = self.fixers["node_problems"]() if "node_problems" in self.fixers else {"failed": [], "issues": []}

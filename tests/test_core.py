@@ -72,7 +72,7 @@ def make_analyst(trusted=()):
         rows = con.execute(sql, params).fetchall()
         return (rows[0] if rows else None) if one else rows
 
-    a = agent.Analyst(db, services_fn=lambda: [], units_fn=lambda: ["todont-backend.service", "llm.service"],
+    a = agent.Analyst(db, services_fn=lambda: [], units_fn=lambda: ["todont-backend.service"],
                       status_fn=None, events_fn=None, ip_labels={}, is_trusted=lambda ip: ip in trusted,
                       config_fn=None)
     return a, db
@@ -107,7 +107,6 @@ class AiOutputValidation(unittest.TestCase):
         out = a.validate_actions([
             {"type": "restart_service", "target": "todont-backend.service", "reason": "ok"},
             {"type": "restart_service", "target": "todont-backend.service", "reason": "dup"},
-            {"type": "restart_service", "target": "llm.service", "reason": "self"},
             {"type": "restart_service", "target": "ssh.service", "reason": "not managed"},
             {"type": "view_ip", "target": "not-an-ip", "reason": "x"},
             {"type": "unban", "target": "1.2.3.4", "reason": "never"},
@@ -386,8 +385,6 @@ class FleetLogic(unittest.TestCase):
             hostsec.wake("not-a-mac")
 
     def test_budget_level_saves_tokens_near_the_limit(self):
-        prev, agent.BACKEND = agent.BACKEND, "claude"
-        self.addCleanup(setattr, agent, "BACKEND", prev)
         future = time.time() + 3600
         for five, week, want in ((0.5, 0.1, "ok"), (0.92, 0.1, "save"), (0.5, 0.96, "save"), (0.98, 0.1, "stop")):
             agent.CLAUDE_LIMITS.clear()
