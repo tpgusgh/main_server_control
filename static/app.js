@@ -543,6 +543,7 @@ async function loadSecurity() {
 
   api("/api/hostblock").then((r) => renderHostBlocks("l", r.installed ? r.blocked : null, null)).catch(() => {});
   loadIntegrity().catch(() => {});
+  loadDevices().catch(() => {});
   loadGuard().catch(() => {});
   loadAiActions().catch(() => {});
   const [{ sessions }, me, { bans }, alertRows] = await Promise.all([api("/api/sessions"), api("/api/me"), api("/api/bans"), loadAlertBadge()]);
@@ -1198,6 +1199,17 @@ async function loadGuard() {
 $("guardRefresh").addEventListener("click", async () => {
   try { await post("/api/guard/refresh", { node: null }); toast("다시 확인했습니다."); loadGuard(); } catch (err) { toast(err.message, true); }
 });
+
+async function loadDevices() {
+  const { devices } = await api("/api/devices");
+  fill($("devices"), devices.map((d) => h("tr", {},
+    h("td", { class: "ua", title: d.ua }, d.email ? `${d.email} · ` : "", d.ua || "?"), ipCell({ ip: d.last_ip }),
+    h("td", { class: "num" }, fmtDateTime(d.created)), h("td", { class: "num" }, fmtDateTime(d.last_seen)),
+    h("td", { class: "actions" }, d.current ? h("span", { class: "pill good" }, "이 기기") : h("button", { class: "btn danger", onclick: async () => {
+      if (!(await confirmDialog("기기 지우기", "이 기기를 잊을까요? 다음에 그 기기로 로그인하면 새 기기 알림이 갑니다.", true))) return;
+      await post("/api/devices/delete", { id: d.id }); loadDevices();
+    } }, "지우기")))), 5, "아직 없습니다 — 다음 로그인부터 기억합니다");
+}
 
 async function loadIntegrity() {
   const f = await api("/api/fleet");

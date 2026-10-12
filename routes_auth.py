@@ -18,6 +18,12 @@ from core import ACCESS_RETENTION, BAN_AFTER_FAILS, COOKIE, FAIL_WINDOW, GLOBAL_
 
 router = APIRouter()
 _bg: set = set()  # keep background tasks referenced until done
+# A browser you logged in from before. Only quiets "new IP" alerts when Wi-Fi/mobile IPs change —
+# it never skips the password or Cloudflare Access.
+DEVICE_COOKIE, DEVICE_MAX = "__Host-sm_device", 365 * 86400
+db("""CREATE TABLE IF NOT EXISTS devices(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, token_hash TEXT UNIQUE, ua TEXT, email TEXT,
+      created INTEGER, last_seen INTEGER, last_ip TEXT)""")
 
 # ---------------------------------------------------------------- pages & auth
 
@@ -107,21 +113,55 @@ async def login(request: Request, body: LoginBody):
                             status_code=401)
 
     known = db("SELECT 1 FROM access_log WHERE ip=? AND event='login_ok' LIMIT 1", (ip,), one=True)
+    ua = request.headers.get("user-agent", "")
+    dtok = request.cookies.get(DEVICE_COOKIE, "")
+    device = db("SELECT id FROM devices WHERE token_hash=?", (_hash_token(dtok),), one=True) if 0 < len(dtok) <= 100 else None
+    if device:
+        db("UPDATE devices SET last_seen=?, last_ip=?, ua=? WHERE id=?", (now, ip, ua[:300], device["id"]))
+    else:
+        dtok = secrets.token_urlsafe(32)
+        db("INSERT INTO devices(token_hash, ua, email, created, last_seen, last_ip) VALUES(?,?,?,?,?,?)",
+           (_hash_token(dtok), ua[:300], request.state.email, now, now, ip))
     token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
     db("INSERT INTO sessions(token_hash,csrf,ip,ua,created,last_seen,email) VALUES(?,?,?,?,?,?,?)",
        (_hash_token(token), csrf, ip, request.headers.get("user-agent", "")[:300], now, now, request.state.email))
     request.state.event = "login_ok"
-    if not known and not ipaddress.ip_address(ip).is_loopback:
+    if not known and device and not ipaddress.ip_address(ip).is_loopback:  # same browser, new Wi-Fi/mobile IP
+        await run_in_threadpool(raise_alert, "new_ip", ip, country, "아는 기기가 새 IP에서 로그인 (알림 안 보냄)", 0, False)
+    elif not known and not ipaddress.ip_address(ip).is_loopback:
         await run_in_threadpool(raise_alert, "new_ip", ip, country,
-                                "처음 보는 IP에서 로그인 성공" + (f" · {request.state.email}" if request.state.email else "") +
-                                f"\n{request.headers.get('user-agent', '')[:120]}")
+                                "처음 보는 기기·IP에서 로그인 성공" + (f" · {request.state.email}" if request.state.email else "") +
+                                f"\n{ua[:120]}")
         from routes_ai import assess_new_login  # lazy: routes_ai imports this module's siblings
         t = asyncio.create_task(assess_new_login(ip, country, request.headers.get("user-agent", ""), request.state.email))
         _bg.add(t)
         t.add_done_callback(_bg.discard)
     resp = JSONResponse({"ok": True})
     resp.set_cookie(COOKIE, token, max_age=SESSION_MAX, path="/", secure=True, httponly=True, samesite="strict")
+    resp.set_cookie(DEVICE_COOKIE, dtok, max_age=DEVICE_MAX, path="/", secure=True, httponly=True, samesite="strict")
     return resp
+
+
+@router.get("/api/devices")
+def devices(request: Request):
+    require_auth(request)
+    mine = _hash_token(request.cookies.get(DEVICE_COOKIE, ""))
+    return {"devices": [{**dict(r), "current": r["token_hash"] == mine, "token_hash": None} for r in
+                        db("SELECT id, token_hash, ua, email, created, last_seen, last_ip FROM devices ORDER BY last_seen DESC")]}
+
+
+class DeviceBody(BaseModel):
+    id: int
+
+
+@router.post("/api/devices/delete")
+def device_delete(request: Request, body: DeviceBody):
+    """Forget a device: its next login counts as a new device again (alert + AI check)."""
+    require_auth(request)
+    db("DELETE FROM devices WHERE id=?", (body.id,))
+    request.state.event = "action"
+    request.state.detail = f"forget device {body.id}"
+    return {"ok": True}
 
 
 @router.post("/api/logout")
