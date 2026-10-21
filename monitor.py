@@ -548,7 +548,7 @@ _updates: dict = {"data": None, "t": 0.0}
 
 def updates_cached():
     """apt state, refreshed in the background at most hourly (apt list takes a moment)."""
-    if time.time() - _updates["t"] > 3600:
+    if time.time() - _updates["t"] > 3600 or hostsec.upgraded_since(_updates["t"]):
         _updates["t"] = time.time()
         threading.Thread(target=lambda: _updates.update(data=hostsec.update_status()), daemon=True).start()
     return _updates["data"]

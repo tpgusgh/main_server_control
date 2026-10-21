@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # hostsec.py ships next to this file
 import hostsec  # noqa: E402
 
-VERSION = "2.2"
+VERSION = "2.3"
 CONFIG_PATH = Path(os.environ.get("AGENT_CONFIG", Path(__file__).resolve().parent / "config.json"))
 UNIT_RE = re.compile(r"^[A-Za-z0-9@._-]+\.service$")
 SAMPLE_INTERVAL = 10
@@ -271,7 +271,7 @@ class Sampler(threading.Thread):
 
     def run(self):
         while True:
-            if time.time() - self._upd_t > 3600:  # apt list: hourly is plenty
+            if time.time() - self._upd_t > 3600 or hostsec.upgraded_since(self._upd_t):  # hourly, or right after an upgrade
                 self._upd_t = time.time()
                 threading.Thread(target=lambda: setattr(self, "updates", hostsec.update_status()), daemon=True).start()
             if time.time() - self._int_t > 3600:

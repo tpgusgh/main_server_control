@@ -443,3 +443,16 @@ class AptPhasing(unittest.TestCase):
                "  libopeniscsiusr open-iscsi\n0 upgraded, 0 newly installed, 0 to remove and 2 not upgraded.\n")
         self.assertEqual(hostsec.phased_packages(sim), ["libopeniscsiusr", "open-iscsi"])
         self.assertEqual(hostsec.phased_packages("0 upgraded"), [])
+
+
+class UpgradeRefresh(unittest.TestCase):
+    def test_counts_refresh_after_an_upgrade_finishes(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "node_agent"))
+        import hostsec
+        real = hostsec.upgrade_status
+        self.addCleanup(setattr, hostsec, "upgrade_status", real)
+        hostsec.upgrade_status = lambda: {"state": "done", "finished": 1000}
+        self.assertTrue(hostsec.upgraded_since(900), "read before the upgrade ended → stale")
+        self.assertFalse(hostsec.upgraded_since(1001), "read after → fresh")
+        hostsec.upgrade_status = lambda: None
+        self.assertFalse(hostsec.upgraded_since(0), "no sm-block → never stale")

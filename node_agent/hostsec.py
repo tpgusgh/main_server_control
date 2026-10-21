@@ -352,6 +352,11 @@ def request_upgrade():
     return _request({"op": "upgrade"}, wait=3.0)
 
 
+def upgraded_since(ts: float) -> bool:
+    """An upgrade finished after `ts` → cached apt counts are stale (re-read now, not at the next hourly check)."""
+    return ((upgrade_status() or {}).get("finished") or 0) > ts
+
+
 def upgrade_status():
     try:
         with open(f"{SM_DIR}/public.json") as f:
