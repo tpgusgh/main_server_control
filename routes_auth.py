@@ -47,7 +47,10 @@ def index(request: Request):
 def login_page(request: Request):
     if request.state.session is not None:
         return RedirectResponse("/", status_code=303)
-    return page("login.html")
+    resp = page("login.html")
+    if request.state.email:  # Cloudflare Access already verified who this is; login.js signs in without a password
+        return HTMLResponse(resp.body.decode().replace("<body", "<body data-auto", 1))
+    return resp
 
 
 @router.get("/robots.txt")
@@ -56,14 +59,16 @@ def robots():
 
 
 class LoginBody(BaseModel):
-    password: str = Field(max_length=256)
+    password: str = Field(default="", max_length=256)
     otp: str = Field(default="", max_length=10)
 
 
 @router.post("/api/login")
 async def login(request: Request, body: LoginBody):
     ip, now = request.state.ip, int(time.time())
-    if not PASSWORD_HASH:
+    # request.state.email is only ever set from a verified Cloudflare Access JWT (app.py), never from the body.
+    via_access = bool(request.state.email) and not body.password
+    if not PASSWORD_HASH and not via_access:
         raise HTTPException(503, f"서버 .env 의 SM_PASSWORD 가 없거나 {MIN_PASSWORD_LEN}자 미만입니다.")
     cfg = security.load_config()
     trusted = is_trusted(ip)
@@ -81,8 +86,8 @@ async def login(request: Request, body: LoginBody):
     global_fails = db("SELECT COUNT(*) c FROM access_log WHERE event='login_fail' AND ts>?",
                       (now - FAIL_WINDOW,), one=True)["c"]
 
-    ok = await run_in_threadpool(security.verify_password, body.password, PASSWORD_HASH)
-    if ok and cfg.get("totp_secret"):
+    ok = via_access or await run_in_threadpool(security.verify_password, body.password, PASSWORD_HASH)
+    if ok and not via_access and cfg.get("totp_secret"):
         with _cfg_lock:
             cfg = security.load_config()
             counter = security.totp_match(cfg["totp_secret"], body.otp, cfg.get("totp_last", 0))

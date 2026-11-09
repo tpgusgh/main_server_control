@@ -1121,6 +1121,7 @@ async function loadFleet(d) {
         !r.local && r.online === false ? h("button", { class: "btn primary", disabled: !r.macs, title: r.macs ? r.macs.map((m) => m.mac).join(", ") : "MAC 주소를 아직 모름 (에이전트 2.0 연결 후 기록)",
           onclick: () => wakeServer(r) }, "켜기 (WoL)") : null));
   }), 8, "");
+  loadPower().catch(() => {});
   $("fleetMeta").textContent = `가동률은 중앙서버 기준으로 매분 기록 · ${f.uptime.this.month} · 디스크는 최근 14일 추세로 예측 · 최신 에이전트 ${f.agent_latest}`;
   return f;
 }
@@ -1210,6 +1211,62 @@ async function loadDevices() {
       await post("/api/devices/delete", { id: d.id }); loadDevices();
     } }, "지우기")))), 5, "아직 없습니다 — 다음 로그인부터 기억합니다");
 }
+
+// ---------------------------------------------------------------- energy + scheduled reboots
+
+const WD = "월화수목금토일";
+const won = (n) => (n == null ? "–" : `${Math.round(n).toLocaleString("ko-KR")}원`);
+async function loadPower() {
+  const p = await api("/api/energy");
+  if (!$("jobDate").value) { const t = new Date(Date.now() + 86400000); $("jobDate").value = `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`; }
+  if (document.activeElement !== $("pricePerKwh")) $("pricePerKwh").value = p.price;
+  $("powerMeta").textContent = `${p.month} · 합계 ${won(p.total_month_won)} · 한 달 예상 ${won(p.total_projected_won)}`;
+  fill($("powerRows"), p.rows.map((r) => h("tr", {},
+    h("td", {}, h("b", {}, r.name)),
+    h("td", { class: "r num" }, r.watts_now == null ? h("span", { class: "muted" }, "꺼짐") : `${r.watts_now} W`),
+    h("td", { class: "r num" }, `${r.today_kwh} kWh`),
+    h("td", { class: "r num" }, `${r.month_kwh} kWh`),
+    h("td", { class: "r num" }, won(r.month_won)),
+    h("td", { class: "r num" }, r.projected_won == null ? h("span", { class: "muted" }, "기록 중") : h("span", { title: `평균 ${r.avg_w} W로 한 달 24시간 켜 둘 때` }, won(r.projected_won))),
+    h("td", {}, h("button", { class: "btn link", title: "눌러서 바꾸기", onclick: async () => {
+      const v = prompt(`${r.name} 추정 기준 — 대기 전력, 최대 전력 (W, 쉼표로)\n노트북 8, 35 · 미니PC 6, 25 · 데스크톱 40, 150 정도`, `${r.idle}, ${r.max}`);
+      if (v == null) return;
+      const [idle, max] = v.split(/[\s,]+/).map(Number);
+      try { await post("/api/energy/settings", { server: r.server, idle, max }); loadPower(); } catch (err) { toast(err.message, true); }
+    } }, `대기 ${r.idle} W ~ 최대 ${r.max} W`)))), 7, "");
+  const opts = p.rows.map((r) => h("option", { value: r.server }, r.name));
+  const cur = $("jobServer").value;
+  $("jobServer").replaceChildren(...opts);
+  if (cur) $("jobServer").value = cur;
+  fill($("jobRows"), p.jobs.map((j) => h("tr", {},
+    h("td", {}, j.name),
+    h("td", {}, j.kind === "once" ? "한 번" : j.kind === "daily" ? `매일 ${j.hhmm}` : `매주 ${WD[j.weekday]}요일 ${j.hhmm}`),
+    h("td", { class: "num" }, j.next_ts ? fmtDateTime(j.next_ts) : h("span", { class: "muted" }, "끝남")),
+    h("td", {}, j.last_result ? `${j.last_result} (${fmtWhen(j.last_run)})` : h("span", { class: "muted" }, "–")),
+    h("td", { class: "actions" }, h("button", { class: "btn danger", onclick: async () => {
+      if (!(await confirmDialog("예약 지우기", `${j.name} 예약 재부팅을 지울까요?`, true))) return;
+      await post("/api/energy/schedule/delete", { id: j.id }); loadPower();
+    } }, "지우기")))), 5, "예약이 없습니다");
+}
+$("pricePerKwh").addEventListener("change", async (e) => {
+  try { await post("/api/energy/settings", { price: Number(e.target.value) }); toast("단가를 바꿨습니다."); loadPower(); } catch (err) { toast(err.message, true); }
+});
+$("jobKind").addEventListener("change", () => {
+  $("jobDate").classList.toggle("hidden", $("jobKind").value !== "once");
+  $("jobWeekday").classList.toggle("hidden", $("jobKind").value !== "weekly");
+});
+$("jobForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const kind = $("jobKind").value, name = $("jobServer").selectedOptions[0]?.textContent;
+  const when = kind === "once" ? `${$("jobDate").value} ${$("jobTime").value}` : kind === "daily" ? `매일 ${$("jobTime").value}` : `매주 ${WD[$("jobWeekday").value]}요일 ${$("jobTime").value}`;
+  const password = await askPassword(`${name} 예약 재부팅 — ${when}`, "정한 시각에 서버가 재부팅됩니다. 비밀번호를 한 번 더 확인합니다.");
+  if (!password) return;
+  try {
+    await post("/api/energy/schedule", { server: $("jobServer").value, kind, hhmm: $("jobTime").value, password,
+      weekday: kind === "weekly" ? Number($("jobWeekday").value) : null, date: kind === "once" ? $("jobDate").value : null });
+    toast("예약했습니다."); loadPower();
+  } catch (err) { toast(err.message, true); }
+});
 
 async function loadIntegrity() {
   const f = await api("/api/fleet");

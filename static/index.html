@@ -106,6 +106,37 @@
         <tbody id="fleetRows"></tbody>
       </table></div>
 
+      <div class="section-title"><h2>전력 · 예상 전기요금</h2><span class="sub" id="powerMeta"></span>
+        <div class="right"><label class="muted price-input">kWh당 <input class="input num" id="pricePerKwh" type="number" min="0" max="2000" step="1"> 원</label></div></div>
+      <div class="card table-wrap"><table>
+        <thead><tr><th>서버</th><th class="r">지금 (추정)</th><th class="r">오늘</th><th class="r">이번 달</th><th class="r">이번 달 요금</th>
+          <th class="r">한 달 예상</th><th>추정 기준</th></tr></thead>
+        <tbody id="powerRows"></tbody>
+      </table>
+      <p class="muted ai-note">전력계 없이 CPU 사용률로 추정합니다: 대기 전력 + (최대 − 대기) × CPU%. 서버마다 '추정 기준'을 실제 기기에 맞게 바꾸고,
+        단가는 고지서 기준으로 바꾸세요 (기본 260원 = 주택용 누진 2구간 + 기후환경·연료비 + 부가세·기금 대략치).</p></div>
+
+      <div class="section-title"><h2>예약 재부팅</h2><span class="sub">정한 시각에 자동 재부팅 · 10분 전과 실행 후 디스코드 알림 · 등록할 때 비밀번호 확인</span></div>
+      <div class="card">
+        <form class="mem-form sched-form" id="jobForm">
+          <select class="input" id="jobServer" aria-label="서버"></select>
+          <select class="input" id="jobKind" aria-label="반복">
+            <option value="once">한 번</option><option value="daily">매일</option><option value="weekly">매주</option>
+          </select>
+          <input class="input" type="date" id="jobDate" aria-label="날짜">
+          <select class="input hidden" id="jobWeekday" aria-label="요일">
+            <option value="0">월</option><option value="1">화</option><option value="2">수</option><option value="3">목</option>
+            <option value="4">금</option><option value="5">토</option><option value="6" selected>일</option>
+          </select>
+          <input class="input" type="time" id="jobTime" value="04:00" required aria-label="시각">
+          <button class="btn primary" type="submit">예약</button>
+        </form>
+        <div class="table-wrap"><table>
+          <thead><tr><th>서버</th><th>반복</th><th>다음 실행</th><th>마지막 결과</th><th class="r"></th></tr></thead>
+          <tbody id="jobRows"></tbody>
+        </table></div>
+      </div>
+
       <div class="section-title"><h2>웹사이트 감시</h2><span class="sub">2분마다 접속 확인 · 2번 연속 실패하면 알림 (3xx·4xx는 정상으로 봄)</span></div>
       <div class="card">
         <form class="mem-form" id="siteForm">

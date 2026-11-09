@@ -3,8 +3,8 @@ const form = document.getElementById("form");
 const err = document.getElementById("err");
 const btn = document.getElementById("submit");
 
-form.addEventListener("submit", async (e) => {
-  e.preventDefault();
+async function login(e) {
+  e?.preventDefault();
   err.textContent = "";
   btn.disabled = true;
   btn.textContent = "확인 중…";
@@ -31,4 +31,7 @@ form.addEventListener("submit", async (e) => {
     btn.disabled = false;
     btn.textContent = "로그인";
   }
-});
+}
+
+form.addEventListener("submit", login);
+if (document.body.hasAttribute("data-auto")) login(); // Cloudflare Access verified: no password

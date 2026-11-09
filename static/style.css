@@ -459,3 +459,6 @@ table.fleet td.actions { display: flex; gap: 6px; justify-content: flex-end; }
 .mem-list .btn { white-space: nowrap; flex: none; }
 .copy-block { display: flex; gap: 8px; align-items: flex-start; }
 .copy-block pre { flex: 1; margin: 0; user-select: all; }
+.price-input .input { width: 80px; margin: 0 4px; }
+.sched-form { flex-wrap: wrap; }
+.sched-form .input { flex: 0 0 auto; }

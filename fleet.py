@@ -34,6 +34,11 @@ db("CREATE TABLE IF NOT EXISTS integrity(server TEXT PRIMARY KEY, ts INTEGER, sn
 db("""CREATE TABLE IF NOT EXISTS integrity_changes(
       id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, server TEXT, name TEXT, changes TEXT)""")
 db("CREATE TABLE IF NOT EXISTS fleet_kv(k TEXT PRIMARY KEY, v TEXT)")
+db("CREATE TABLE IF NOT EXISTS power_daily(day TEXT, server TEXT, wh REAL DEFAULT 0, minutes INTEGER DEFAULT 0, "
+   "PRIMARY KEY(day, server))")
+db("""CREATE TABLE IF NOT EXISTS power_jobs(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, server TEXT, kind TEXT, hhmm TEXT, weekday INTEGER, next_ts INTEGER,
+      warned INTEGER DEFAULT 0, created INTEGER, last_run INTEGER, last_result TEXT)""")
 if "macs" not in {r[1] for r in db("PRAGMA table_info(nodes)")}:
     db("ALTER TABLE nodes ADD COLUMN macs TEXT DEFAULT ''")
 
@@ -255,6 +260,127 @@ async def check_tunnels():
     return out
 
 
+# ---------------------------------------------------------------- energy estimate (no power meter: CPU-based model)
+
+DEFAULT_W = {"idle": 8.0, "max": 35.0}  # whole-machine watts at 0% / 100% CPU (laptop-class box); editable per server
+# 원/kWh. shortcut: one flat marginal rate (주택용 누진 2구간 + 기후환경·연료비 + 부가세·기금 ≈ 260), edit to your bill
+DEFAULT_PRICE = 260
+
+
+def power_cfg() -> dict:
+    return {"price": DEFAULT_PRICE, "servers": {}, **json.loads(_kv("power_cfg") or "{}")}
+
+
+def watts(cpu: float, prof: dict) -> float:
+    p = {**DEFAULT_W, **(prof or {})}
+    return p["idle"] + (p["max"] - p["idle"]) * min(max(cpu, 0.0), 100.0) / 100
+
+
+def cpu_last_minute() -> dict:
+    """Average CPU of the last minute per server; servers with no samples (off/unreachable) are left out."""
+    since = int(time.time()) - TICK
+    out = {}
+    r = db("SELECT AVG(cpu) c FROM metrics WHERE ts>=?", (since,), one=True)
+    if r and r["c"] is not None:
+        out[MAIN] = r["c"]
+    for n in hub.nodes():
+        r = db("SELECT AVG(cpu) c FROM node_metrics WHERE node_id=? AND ts>=?", (n["id"], since), one=True)
+        if r and r["c"] is not None:
+            out[f"node:{n['id']}"] = r["c"]
+    return out
+
+
+def energy_tick():
+    cfg, day = power_cfg(), _today()
+    for key, cpu in cpu_last_minute().items():
+        db("INSERT OR IGNORE INTO power_daily(day, server) VALUES(?,?)", (day, key))
+        db("UPDATE power_daily SET wh=wh+?, minutes=minutes+1 WHERE day=? AND server=?",
+           (watts(cpu, cfg["servers"].get(key)) * TICK / 3600, day, key))
+    db("DELETE FROM power_daily WHERE day < ?", ((datetime.now(TZ) - timedelta(days=400)).strftime("%Y-%m-%d"),))
+
+
+def energy_view() -> dict:
+    cfg, now = power_cfg(), datetime.now(TZ)
+    month, today = now.strftime("%Y-%m"), _today()
+    days_in_month = ((now.replace(day=1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)).day
+    cpu = cpu_last_minute()
+    rows = []
+    for key, name in server_names().items():
+        m = db("SELECT COALESCE(SUM(wh),0) wh, COALESCE(SUM(minutes),0) mins FROM power_daily WHERE server=? AND day LIKE ?",
+               (key, month + "-%"), one=True)
+        t = db("SELECT wh FROM power_daily WHERE server=? AND day=?", (key, today), one=True)
+        prof = {**DEFAULT_W, **cfg["servers"].get(key, {})}
+        avg_w = m["wh"] / (m["mins"] / 60) if m["mins"] else None
+        month_kwh = m["wh"] / 1000
+        rows.append({"server": key, "name": name, "idle": prof["idle"], "max": prof["max"],
+                     "watts_now": round(watts(cpu[key], prof), 1) if key in cpu else None,
+                     "avg_w": round(avg_w, 1) if avg_w else None,
+                     "today_kwh": round((t["wh"] if t else 0) / 1000, 3), "month_kwh": round(month_kwh, 2),
+                     "month_won": round(month_kwh * cfg["price"]),
+                     # a full month at the average draw so far (assumes it stays on 24h)
+                     "projected_won": round(avg_w * 24 * days_in_month / 1000 * cfg["price"]) if avg_w else None})
+    return {"price": cfg["price"], "month": month, "rows": rows,
+            "total_month_won": sum(r["month_won"] for r in rows),
+            "total_projected_won": sum(r["projected_won"] or 0 for r in rows)}
+
+
+# ---------------------------------------------------------------- scheduled reboots
+
+def next_run(kind: str, hhmm: str, weekday: int | None = None, date: str | None = None, now: datetime | None = None):
+    """Next KST run time (unix) for a job; None when a one-off date/time is already past."""
+    now = now or datetime.now(TZ)
+    h, m = map(int, hhmm.split(":"))
+    if kind == "once":
+        t = datetime.strptime(date, "%Y-%m-%d").replace(hour=h, minute=m, tzinfo=TZ)
+        return int(t.timestamp()) if t > now else None
+    t = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    if kind == "weekly":
+        t += timedelta(days=(weekday - t.weekday()) % 7)
+    while t <= now:
+        t += timedelta(days=7 if kind == "weekly" else 1)
+    return int(t.timestamp())
+
+
+async def reboot_server(key: str) -> tuple[bool, str]:
+    if key == MAIN:
+        if monitor.power_state().get("reboot") != "yes":
+            return False, "재부팅 권한 없음 — 이 서버에서 한 번: sudo bash ~/server-monitor/node_agent/allow-power.sh"
+        import subprocess
+        import threading
+        threading.Timer(8, lambda: subprocess.run(["systemctl", "reboot"])).start()  # let the alert go out first
+        return True, "8초 뒤 재부팅"
+    node = hub.get(int(key.split(":")[1]))
+    if not node:
+        return False, "서버 없음"
+    code, data = await hub._post(node, "/v1/power/reboot")
+    return code == 200, data.get("detail", "") if code != 200 else "재부팅 시작"
+
+
+async def run_jobs():
+    now = time.time()
+    names = server_names()
+    for j in await asyncio.to_thread(db, "SELECT * FROM power_jobs WHERE next_ts IS NOT NULL"):
+        name = names.get(j["server"])
+        if not name:
+            continue
+        if not j["warned"] and 0 < j["next_ts"] - now <= 600:
+            await asyncio.to_thread(db, "UPDATE power_jobs SET warned=1 WHERE id=?", (j["id"],))
+            await asyncio.to_thread(raise_alert, "power", "", "", f"서버 '{name}' 예약 재부팅 10분 전 "
+                                    f"({datetime.fromtimestamp(j['next_ts'], TZ):%m-%d %H:%M})")
+        if now < j["next_ts"]:
+            continue
+        nxt = None if j["kind"] == "once" else next_run(j["kind"], j["hhmm"], j["weekday"])
+        # saved BEFORE acting: rebooting this server ends this process
+        await asyncio.to_thread(db, "UPDATE power_jobs SET next_ts=?, warned=0, last_run=? WHERE id=?", (nxt, int(now), j["id"]))
+        if now - j["next_ts"] > 1800:  # the dashboard was down at the time: don't reboot hours late
+            ok, msg = False, "건너뜀 — 예약 시각에 대시보드가 꺼져 있었음"
+        else:
+            ok, msg = await reboot_server(j["server"])
+        await asyncio.to_thread(db, "UPDATE power_jobs SET last_result=? WHERE id=?", (("✓ " if ok else "✗ ") + msg, j["id"]))
+        await asyncio.to_thread(raise_alert, "power" if ok else "needs_you", "", "",
+                                f"서버 '{name}' 예약 재부팅 {'실행' if ok else '실패'} — {msg}")
+
+
 # ---------------------------------------------------------------- monthly report + loop
 
 def monthly_report_due() -> str | None:
@@ -281,6 +407,8 @@ async def loop():
         try:
             await asyncio.to_thread(ledger.tick)
             await asyncio.to_thread(check_boots)
+            await asyncio.to_thread(energy_tick)
+            await run_jobs()
             if time.time() - last_hour >= 3600:
                 last_hour = time.time()
                 await asyncio.to_thread(record_disk)
@@ -477,4 +605,88 @@ def exposure_allow(request: Request, body: PublicOkBody):
     _kv("public_ok", json.dumps(sorted(cur)))
     request.state.event = "action"
     request.state.detail = f"public_ok {body.host} {body.allowed}"
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- energy + scheduled reboot API
+
+WEEKDAYS = "월화수목금토일"
+
+
+@router.get("/api/energy")
+def power_view(request: Request):
+    require_auth(request)
+    names = server_names()
+    jobs = [{**dict(r), "name": names.get(r["server"], "(삭제된 서버)")} for r in
+            db("SELECT id, server, kind, hhmm, weekday, next_ts, last_run, last_result FROM power_jobs ORDER BY id")]
+    return {**energy_view(), "jobs": jobs}
+
+
+class EnergyBody(BaseModel):
+    price: float | None = Field(default=None, ge=0, le=2000)
+    server: str | None = Field(default=None, max_length=20)
+    idle: float | None = Field(default=None, ge=0, le=2000)
+    max: float | None = Field(default=None, ge=0, le=2000)
+
+
+@router.post("/api/energy/settings")
+def power_settings(request: Request, body: EnergyBody):
+    require_auth(request)
+    cfg = power_cfg()
+    if body.price is not None:
+        cfg["price"] = body.price
+    if body.server:
+        if body.server not in server_names():
+            raise HTTPException(404, "서버가 없습니다.")
+        prof = {**DEFAULT_W, **cfg["servers"].get(body.server, {})}
+        prof.update({k: v for k, v in (("idle", body.idle), ("max", body.max)) if v is not None})
+        if prof["idle"] > prof["max"]:
+            raise HTTPException(400, "대기 전력이 최대 전력보다 클 수 없습니다.")
+        cfg["servers"][body.server] = prof
+    _kv("power_cfg", json.dumps(cfg))
+    return {"ok": True}
+
+
+class JobBody(BaseModel):
+    server: str = Field(max_length=20)
+    kind: str = Field(pattern="^(once|daily|weekly)$")
+    hhmm: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    weekday: int | None = Field(default=None, ge=0, le=6)
+    date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    password: str = Field(max_length=256)
+
+
+@router.post("/api/energy/schedule")
+async def power_schedule(request: Request, body: JobBody):
+    require_auth(request)
+    name = server_names().get(body.server)
+    if not name:
+        raise HTTPException(404, "서버가 없습니다.")
+    if body.kind == "weekly" and body.weekday is None or body.kind == "once" and not body.date:
+        raise HTTPException(400, "요일 또는 날짜를 정하세요.")
+    try:
+        nxt = next_run(body.kind, body.hhmm, body.weekday, body.date)
+    except ValueError:
+        raise HTTPException(400, "날짜가 올바르지 않습니다.")
+    if nxt is None:
+        raise HTTPException(400, "이미 지난 시각입니다.")
+    if not await run_in_threadpool(confirm_password, request, body.password):
+        raise HTTPException(403, "비밀번호가 틀렸습니다.")
+    db("INSERT INTO power_jobs(server, kind, hhmm, weekday, next_ts, created) VALUES(?,?,?,?,?,?)",
+       (body.server, body.kind, body.hhmm, body.weekday if body.kind == "weekly" else None, nxt, int(time.time())))
+    when = {"once": body.date, "daily": "매일", "weekly": f"매주 {WEEKDAYS[body.weekday or 0]}요일"}[body.kind]
+    request.state.event, request.state.detail = "action", f"schedule reboot {name} {when} {body.hhmm}"
+    await asyncio.to_thread(raise_alert, "power", request.state.ip, "", f"서버 '{name}' 예약 재부팅 등록: {when} {body.hhmm}")
+    return {"ok": True, "next_ts": nxt}
+
+
+class JobDelBody(BaseModel):
+    id: int
+
+
+@router.post("/api/energy/schedule/delete")
+def power_schedule_delete(request: Request, body: JobDelBody):
+    require_auth(request)
+    db("DELETE FROM power_jobs WHERE id=?", (body.id,))
+    request.state.event, request.state.detail = "action", f"delete reboot schedule {body.id}"
     return {"ok": True}
