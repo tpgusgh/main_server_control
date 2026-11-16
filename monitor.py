@@ -252,10 +252,12 @@ def managed_units() -> list[str]:
     return sorted(p.name for p in USER_UNIT_DIR.glob("*.service") if p.is_file() and UNIT_RE.match(p.name))
 
 
-def system_units() -> list[str]:
-    """Running or failed system services (docker, databases, ssh, ...): shown read-only, like on the agents."""
+def system_units(include_stopped: bool = False) -> list[str]:
+    """Running or failed system services (docker, databases, ssh, ...); with include_stopped, every loaded one
+    (so a service stopped from here can be started again)."""
     try:
-        r = subprocess.run(["systemctl", "list-units", "--type=service", "--state=running,failed", "--no-legend", "--plain"],
+        r = subprocess.run(["systemctl", "list-units", "--type=service", "--no-legend", "--plain",
+                            "--all" if include_stopped else "--state=running,failed"],
                            capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return []
@@ -263,6 +265,7 @@ def system_units() -> list[str]:
 
 
 def _show_units(units: list[str], system: bool) -> list[dict]:
+    root_ok = system and "svc" in hostsec.caps()
     props = "Id,Description,ActiveState,SubState,MainPID,ActiveEnterTimestamp,UnitFileState,NRestarts"
     args = ("show", *units, "-p", props, "--timestamp=unix")
     res = subprocess.run(["systemctl", *args], capture_output=True, text=True, timeout=10) if system else _systemctl(*args)
@@ -291,7 +294,8 @@ def _show_units(units: list[str], system: bool) -> list[dict]:
                     "since": int(d["ActiveEnterTimestamp"][1:]) if d.get("ActiveEnterTimestamp", "").startswith("@") else None,
                     "enabled": d.get("UnitFileState"), "restarts": d.get("NRestarts"), "mem": mem, "cpu": cpu,
                     "protected": d.get("Id") in PROTECTED_UNITS,
-                    "scope": "system" if system else "user", "controllable": not system})
+                    "scope": "system" if system else "user", "controllable": not system,
+                    **({"root": True} if system and root_ok else {})})
     return out
 
 
@@ -320,6 +324,12 @@ def service_action(request: Request, unit: str, action: str):
     require_auth(request)
     if action not in ("start", "stop", "restart", "enable", "disable", "delete"):
         raise HTTPException(400, "unknown action")
+    if UNIT_RE.match(unit) and unit not in managed_units() and action != "delete" and unit in system_units(include_stopped=True):
+        request.state.event, request.state.detail = "action", f"{action} {unit} (system)"
+        ok, msg = hostsec.system_service(action, unit)  # root sm-block re-checks the deny list
+        if not ok:
+            raise HTTPException(409, msg)
+        return {"ok": True, "detail": msg}
     if not UNIT_RE.match(unit) or unit not in managed_units():
         raise HTTPException(404, "unknown unit")
     if action == "delete":
@@ -418,13 +428,11 @@ def network(request: Request):
 @router.post("/api/process/{pid}/terminate")
 def terminate(request: Request, pid: int):
     require_auth(request)
-    listen_pids = {c.pid for c in psutil.net_connections(kind="inet") if c.status == psutil.CONN_LISTEN}
-    if pid not in listen_pids or pid in _protected_pids():
-        raise HTTPException(403, "이 프로세스는 종료할 수 없습니다.")
+    ok, why = hostsec.killable(pid, PROTECTED_UNITS, _protected_pids())
+    if not ok:
+        raise HTTPException(404 if "없습니다" in why else 403, why)
     try:
         p = psutil.Process(pid)
-        if p.uids().real != os.getuid():
-            raise HTTPException(403, "다른 사용자의 프로세스입니다.")
         request.state.event = "action"
         request.state.detail = f"terminate pid {pid} ({p.name()})"
         p.send_signal(signal.SIGTERM)

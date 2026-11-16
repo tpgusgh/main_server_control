@@ -501,3 +501,6 @@ table.fleet td.actions { display: flex; gap: 6px; justify-content: flex-end; }
 .md-table th, .md-table td { border: 1px solid var(--border); padding: 4px 10px; text-align: left; white-space: nowrap; }
 .md-table th { background: color-mix(in srgb, var(--ink) 5%, transparent); font-weight: 600; }
 .chart .maxline { fill: none; stroke: var(--series); stroke-width: 1; opacity: .35; stroke-linejoin: round; }
+.chat-actions { display: grid; gap: 6px; margin-top: 8px; padding: 10px 12px; border: 1px dashed var(--border); border-radius: 12px; }
+.chat-action { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 12.5px; }
+#confirmText { white-space: pre-line; }

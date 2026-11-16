@@ -457,3 +457,25 @@ class UpgradeRefresh(unittest.TestCase):
         hostsec.upgrade_status = lambda: None
         self.assertFalse(hostsec.upgraded_since(0), "no sm-block → never stale")
 
+
+
+class ChatActions(unittest.TestCase):
+    def test_only_real_controllable_targets_become_buttons(self):
+        a, _ = make_analyst()
+        a.services_fn = lambda: [
+            {"unit": "app.service", "controllable": True},
+            {"unit": "server-monitor.service", "controllable": True, "protected": True},
+            {"unit": "worldrium.service", "controllable": False, "root": True},
+            {"unit": "ssh.service", "controllable": False}]
+        a.status_fn = lambda: {"top": [{"pid": 1736, "name": "Unity"}]}
+        out = a.validate_chat_actions([
+            {"type": "stop_service", "target": "worldrium.service", "label": "끄기", "reason": "r"},
+            {"type": "disable_service", "target": "worldrium.service", "label": "자동시작 끄기", "reason": "r"},
+            {"type": "stop_service", "target": "server-monitor.service", "label": "x", "reason": "protected"},
+            {"type": "restart_service", "target": "ssh.service", "label": "x", "reason": "view-only"},
+            {"type": "terminate_process", "target": "999", "label": "x", "reason": "not in the list"},
+            {"type": "terminate_process", "target": "1736", "label": "Unity 종료", "reason": "r"},
+            {"type": "rm_rf", "target": "/", "label": "x", "reason": "x"},
+        ])
+        self.assertEqual([(x["action"], x["target"]) for x in out],
+                         [("stop", "worldrium.service"), ("disable", "worldrium.service"), ("terminate", "1736")])

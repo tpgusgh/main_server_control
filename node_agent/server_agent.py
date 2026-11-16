@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # hostsec.py ships next to this file
 import hostsec  # noqa: E402
 
-VERSION = "2.3"
+VERSION = "2.4"
 CONFIG_PATH = Path(os.environ.get("AGENT_CONFIG", Path(__file__).resolve().parent / "config.json"))
 UNIT_RE = re.compile(r"^[A-Za-z0-9@._-]+\.service$")
 SAMPLE_INTERVAL = 10
@@ -256,6 +256,9 @@ class Sampler(threading.Thread):
             top.append({"pid": pid, "name": name, "user": username(uid), "cpu": round(cpu, 1),
                         "mem": round(rss / mem["mem_total"] * 100, 1) if mem["mem_total"] else 0})
         top.sort(key=lambda p: (p["cpu"], p["mem"]), reverse=True)
+        for p in top[:8]:  # what started it (systemd unit / parent / command) — lets the AI answer "where is this from"
+            info = hostsec.proc_info(p["pid"]) or {}
+            p.update({k: info.get(k) for k in ("unit", "parent", "ppid", "cmd")})
         ts = temps()
         root = next((d for d in disks() if d["mount"] == "/"), None)
         self.latest = {"ts": int(now), "cpu": round(sum(per_core) / len(per_core), 1) if per_core else 0,
@@ -341,7 +344,8 @@ def services():
             out += [dict(x, scope="user", controllable=True) for x in _show(sorted(managed), False)]
         sysu = system_units()
         if sysu:
-            out += [dict(x, scope="system", controllable=False) for x in _show(sysu, True)]
+            root = {"root": True} if "svc" in hostsec.caps() else {}
+            out += [dict(x, scope="system", controllable=False, **root) for x in _show(sysu, True)]
     else:
         units = sorted(set(system_units()) | managed)
         if units:
@@ -415,6 +419,9 @@ def sockets():
 def service_action(unit, action):
     if action not in ("start", "stop", "restart", "enable", "disable", "delete"):
         return 400, {"detail": "unknown action"}
+    if UNIT_RE.match(unit) and unit not in managed_units() and action != "delete":
+        ok, msg = hostsec.system_service(action, unit)  # root sm-block, deny list re-checked there
+        return (200, {"ok": True, "detail": msg}) if ok else (409, {"detail": msg})
     if not UNIT_RE.match(unit) or unit not in managed_units():
         return 404, {"detail": "unknown unit"}
     if action == "delete":
@@ -574,9 +581,9 @@ class Handler(BaseHTTPRequestHandler):
         t = re.fullmatch(r"/v1/process/(\d+)/terminate", self.path)
         if t:
             pid = int(t.group(1))
-            listen_pids = {p["pid"] for p in sampler.latest.get("ports", []) if p.get("pid")}
-            if pid not in listen_pids or pid == os.getpid():
-                return self.reply(403, {"detail": "이 프로세스는 종료할 수 없습니다."})
+            ok, why = hostsec.killable(pid, PROTECTED)  # own user's processes only, never protected units/plumbing
+            if not ok:
+                return self.reply(404 if "없습니다" in why else 403, {"detail": why})
             try:
                 os.kill(pid, 15)  # SIGTERM; the kernel only allows our own processes
             except PermissionError:

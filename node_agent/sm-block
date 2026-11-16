@@ -13,6 +13,8 @@ so automation can never lock you out. The table is separate from ufw and restore
                                ("upgrade" requests run apt-get update + upgrade; no arguments accepted)
   sm-block restore             re-apply saved list and port guard (boot)
   sm-block guard               show the port guard (외부 차단 모드) config
+  (queued "svc" requests start/stop/restart/enable/disable an existing system service — never ssh, systemd,
+   dbus, tailscale, cloudflared, networking, cron, polkit or sm-block itself)
 
 Port guard (table `inet sm_guard`, separate from the block list so one can't break the other):
 traffic from PUBLIC source addresses may only reach the allowed ports (SSH is always allowed, as is
@@ -23,6 +25,7 @@ off, listed "internal only" ports are still closed to public sources.
 import ipaddress
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -192,13 +195,37 @@ def old_guard():
         return None
 
 
+# System-service control (start/stop/restart/enable/disable an EXISTING unit). Units whose loss would cut you off
+# or break the machine are refused outright; nothing here can create or edit unit files.
+SVC_RE = re.compile(r"^[A-Za-z0-9@._-]{1,100}\.service$")
+SVC_DENY = re.compile(r"^(ssh|sshd|systemd-[a-z0-9-]+|dbus(-broker)?|tailscaled|cloudflared|polkit|NetworkManager|"
+                      r"networkd-dispatcher|wpa_supplicant|netplan-[a-z0-9@-]+|getty@.*|serial-getty@.*|user@.*|"
+                      r"user-runtime-dir@.*|sm-block.*|cron|rsyslog|snapd|unattended-upgrades|apparmor|ufw|nftables|"
+                      r"chrony|systemd)\.service$")
+SVC_ACTIONS = {"start", "stop", "restart", "enable", "disable"}
+
+
+def do_svc(action: str, unit: str) -> str:
+    if action not in SVC_ACTIONS or not SVC_RE.match(unit):
+        raise ValueError("잘못된 요청")
+    if SVC_DENY.match(unit):
+        raise ValueError(f"{unit} 은(는) 접속·시스템 유지에 필요해서 원격으로 바꿀 수 없습니다")
+    if subprocess.run(["systemctl", "cat", unit], capture_output=True).returncode != 0:
+        raise ValueError(f"{unit} 이(가) 없습니다")
+    r = subprocess.run(["systemctl", action, unit], capture_output=True, text=True, timeout=60)
+    if r.returncode:
+        raise ValueError(f"systemctl {action} {unit} 실패: {(r.stderr or r.stdout).strip()[:150]}")
+    return f"{unit} {action} 완료"
+
+
 def write_public(d: dict, results: dict, upgrade=None, guard=None):
     keep = dict(sorted(results.items(), key=lambda kv: -kv[1]["ts"])[:50])
     tmp = PUBLIC + ".tmp"
     with open(tmp, "w") as f:
         json.dump({"blocked": [{"key": k, **v} for k, v in sorted(d.items(), key=lambda kv: -kv[1]["ts"])],
                    "results": keep, "upgrade": upgrade if upgrade is not None else old_upgrade(),
-                   "guard": guard or {**(old_guard() or {}), "stats": guard_stats()}}, f)
+                   "guard": guard or {**(old_guard() or {}), "stats": guard_stats()},
+                   "caps": ["block", "upgrade", "guard", "svc"]}, f)
     os.chmod(tmp, 0o644)
     os.replace(tmp, PUBLIC)
 
@@ -305,6 +332,8 @@ def process(d: dict):
                     json.dump(g, f)
                 os.replace(GUARD + ".tmp", GUARD)
                 guard, msg = guard_public(), "외부 차단 설정 적용됨"
+            elif req.get("op") == "svc":
+                msg = do_svc(str(req.get("action", "")), str(req.get("unit", "")))
             elif req.get("op") == "stats":
                 guard, msg = guard_public((old_guard() or {}).get("error")), "갱신"
             elif req.get("op") == "upgrade":

@@ -939,7 +939,7 @@ function restoreChat() {
 }
 function setChatTarget() {
   const name = currentNode != null ? ((nodeCache && nodeCache.id === currentNode && nodeCache.name) || "원격 서버") : (lastStatus && (lastStatus.name || lastStatus.host)) || "이 서버";
-  $("chatTarget").textContent = `${name} 데이터로 답합니다 · 아무것도 실행하지 않습니다`;
+  $("chatTarget").textContent = `${name} 데이터로 답합니다 · 조치는 버튼으로 제안하고, 눌러야 실행돼요`;
 }
 function growInput() {
   const t = $("chatInput");
@@ -983,6 +983,7 @@ async function askAi(question) {
         if (ev.error) throw new Error(ev.error);
         if (ev.t) { answer += ev.t; out.replaceChildren(...md(answer)); $("chatLog").scrollTop = $("chatLog").scrollHeight; }
         if (ev.memory) loadMemory().catch(() => {});
+        if (ev.actions) out.closest(".msg-col").append(chatActions(ev.actions));
         if (ev.done && ev.past) out.closest(".msg-col").querySelector(".bubble-meta").append(` · 지난 대화 ${ev.past}개 참고`);
       }
     }
@@ -996,6 +997,26 @@ async function askAi(question) {
     $("chatSend").disabled = false;
     $("chatInput").focus();
   }
+}
+
+/** Buttons for what the AI proposed. Nothing runs without a click + confirm, and the server re-checks on click. */
+function chatActions(list) {
+  return h("div", { class: "chat-actions" }, list.map((a) => {
+    const risky = ["stop", "disable", "terminate"].includes(a.action);
+    const b = h("button", { class: `btn ${risky ? "danger" : "primary"}`, type: "button", onclick: async () => {
+      if (!(await confirmDialog(a.label, `${a.reason ? `${a.reason}\n\n` : ""}AI가 제안한 조치입니다. 실행할까요?`, risky))) return;
+      b.disabled = true; b.textContent = "실행 중…";
+      try {
+        const base = a.node != null ? `/api/nodes/${a.node}` : "/api";
+        const r = await post(a.action === "terminate" ? `${base}/process/${encodeURIComponent(a.target)}/terminate`
+          : `${base}/services/${encodeURIComponent(a.target)}/${a.action}`);
+        b.textContent = `✓ ${a.label}`;
+        toast(r.detail || "실행했습니다.");
+        if (activeTab === "services") loadServices().catch(() => {});
+      } catch (err) { b.disabled = false; b.textContent = a.label; toast(err.message, true); }
+    } }, a.label);
+    return h("div", { class: "chat-action" }, b, a.reason ? h("span", { class: "muted" }, a.reason) : null);
+  }));
 }
 
 $("chatNew").addEventListener("click", () => {
@@ -1442,7 +1463,7 @@ function renderNode(n) {
   $("ndMeta").textContent = n.online ? `${d.host} · ${n.address} · ${d.os || ""} · 가동 ${fmtDur(d.uptime)}` : `${n.address} · ${n.error || "연결 끊김"}`;
   $("ndScope").textContent = agentOld(d.version)
     ? `⚠ 에이전트 ${d.version || "구버전"} — 시스템 서비스·포트를 보려면 그 서버에 에이전트를 다시 설치하세요 (토큰 유지)`
-    : "사용자 서비스는 제어 가능 · 시스템 서비스는 보기 전용 (root 필요)";
+    : "사용자 서비스는 제어 가능 · 시스템 서비스는 최신 sm-block(install-blocker.sh)이 있으면 제어 가능 (ssh·tailscale 등 핵심 서비스 제외)";
   if (x) {
     $("ndTiles").replaceChildren(
       tile("CPU", x.cpu.toFixed(1), "%", `${d.cpu_count}코어`, x.cpu, level(x.cpu, 60, 80)),
@@ -1583,7 +1604,7 @@ const oldAgentNote = (d) => agentOld(d.version) ? `⚠ 에이전트 ${d.version 
 
 function renderNodeServices(n) {
   const d = n.data || {};
-  $("lingerNote").textContent = oldAgentNote(d) || "사용자 서비스는 제어 가능 · 시스템 서비스는 보기 전용 (root 필요)";
+  $("lingerNote").textContent = oldAgentNote(d) || "사용자 서비스는 제어 가능 · 시스템 서비스는 최신 sm-block(install-blocker.sh)이 있으면 제어 가능 (ssh·tailscale 등 핵심 서비스 제외)";
   renderServiceRows(d.services || [], { act: (unit, a) => nodeServiceAction(n, unit, a),
     logs: agentBelow(d.version, 7) ? null : (unit) => openLogs(unit, n), deletable: !agentBelow(d.version, 6),
     empty: n.online ? "등록된 서비스가 없습니다" : "서버에 연결할 수 없습니다" });
@@ -1594,7 +1615,8 @@ function renderServiceRows(list, { act, logs, deletable, empty }) {
   const svcs = [...list].sort((a, b) => (a.active === "failed" ? -1 : 0) - (b.active === "failed" ? -1 : 0)
     || (b.controllable !== false) - (a.controllable !== false) || a.unit.localeCompare(b.unit));
   fill($("services"), svcs.map((sv) => {
-    const ctl = sv.controllable !== false;  // agents < 1.2 only reported controllable user units
+    const root = sv.controllable === false && sv.root;  // system service, controllable through root sm-block
+    const ctl = sv.controllable !== false || root;  // agents < 1.2 only reported controllable user units
     const running = sv.active === "active", enabled = sv.enabled === "enabled";
     const cls = running ? "good" : sv.active === "failed" ? "crit" : sv.active === "activating" || sv.active === "deactivating" ? "warn" : "";
     return h("tr", {},
@@ -1613,7 +1635,7 @@ function renderServiceRows(list, { act, logs, deletable, empty }) {
         running ? null : h("button", { class: "btn", onclick: () => act(sv.unit, "start") }, "켜기"),
         h("button", { class: "btn", onclick: () => act(sv.unit, "restart") }, "다시 켜기"),
         running && !sv.protected ? h("button", { class: "btn danger", onclick: () => act(sv.unit, "stop") }, "종료") : null,
-        !running && !sv.protected && deletable ? h("button", { class: "btn danger", onclick: () => act(sv.unit, "delete") }, "삭제") : null]
+        !running && !sv.protected && deletable && !root ? h("button", { class: "btn danger", onclick: () => act(sv.unit, "delete") }, "삭제") : null]
         : h("span", { class: "muted", title: `그 서버에서: sudo systemctl restart ${sv.unit}` }, "보기 전용"),
         logs ? h("button", { class: "btn", onclick: () => logs(sv.unit) }, "로그") : null));
   }), 8, empty);
