@@ -439,19 +439,30 @@ def upnp_mappings(timeout: float = 3.0):
 
 
 def tunnel_hosts() -> list[dict]:
-    """Hostnames this machine publishes through Cloudflare Tunnel (config files readable by this user)."""
+    """Hostnames this machine publishes through Cloudflare Tunnel: the configs of the cloudflared processes that
+    are actually running (backup/candidate .yml files are ignored); all configs only if none is running."""
     import glob
-    out = []
-    for path in glob.glob(str(Path.home() / ".cloudflared" / "*.yml")) + glob.glob("/etc/cloudflared/*.yml"):
+    running = []
+    for cmd in glob.glob("/proc/[0-9]*/cmdline"):
+        parts = _read(cmd).split("\0")
+        if parts and parts[0].endswith("cloudflared") and "--config" in parts:
+            i = parts.index("--config")
+            if i + 1 < len(parts):
+                running.append(parts[i + 1])
+    paths = running or glob.glob(str(Path.home() / ".cloudflared" / "*.yml")) + glob.glob("/etc/cloudflared/*.yml")
+    out, seen = [], set()
+    for path in dict.fromkeys(paths):
         host = None
         for line in _read(path).splitlines():
             m = re.match(r"\s*-?\s*hostname:\s*([A-Za-z0-9.-]+)", line)
             if m:
                 host = m.group(1).lower()
                 continue
-            m = re.match(r"\s*service:\s*(\S+)", line)
-            if m and host:
+            m = re.match(r"\s*-?\s*service:\s*(\S+)", line)
+            if m and host and not m.group(1).startswith("http_status:") and (host, m.group(1)) not in seen:
+                seen.add((host, m.group(1)))
                 out.append({"host": host, "service": m.group(1)[:80], "config": Path(path).name})
+            if m:
                 host = None
     return out
 
