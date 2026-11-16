@@ -147,7 +147,7 @@ function lineChart(box, pts, { yMax, unit, threshold, fmt, bucket, hours }) {
 
   const now = Date.now() / 1000, t0 = now - hours * 3600;
   const vals = pts.filter((p) => p.v != null);
-  const top = yMax ?? Math.max(1, ...vals.map((p) => p.v)) * 1.15;
+  const top = yMax ?? Math.max(1, ...vals.map((p) => Math.max(p.v, p.max ?? p.v))) * 1.15;
   const x = (t) => m.l + ((t - t0) / (now - t0)) * iw;
   const y = (v) => m.t + ih - (Math.min(v, top) / top) * ih;
 
@@ -183,6 +183,11 @@ function lineChart(box, pts, { yMax, unit, threshold, fmt, bucket, hours }) {
   }
   if (cur.length) segs.push(cur);
   for (const seg of segs) {
+    // bucket peaks: long ranges plot averages, so a 10-second spike would otherwise vanish
+    if (seg.some((p) => p.max != null && p.max - p.v >= 1)) {
+      const dm = seg.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.max ?? p.v).toFixed(1)}`).join("");
+      svg.append(s("path", { d: dm, class: "maxline" }));
+    }
     const d = seg.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join("");
     svg.append(s("path", { d: `${d}L${x(seg[seg.length - 1].t).toFixed(1)},${y(0)}L${x(seg[0].t).toFixed(1)},${y(0)}Z`, class: "area" }));
     svg.append(s("path", { d, class: "line" }));
