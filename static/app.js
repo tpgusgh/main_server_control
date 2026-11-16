@@ -1145,16 +1145,21 @@ function copyBlock(text) {
 }
 function agentUpdateHelp(n, latest) {
   const dest = `${n.user || "<사용자>"}@${n.address.split(":")[0]}`;
+  const btn = h("button", { class: "btn primary", type: "button", onclick: async () => {
+    btn.disabled = true; btn.textContent = "업데이트 중… (1분 정도)";
+    try { await post(`/api/fleet/update-agent/${n.id}`); toast(`${n.name} 에이전트를 ${latest}로 업데이트했습니다.`); $("reportModal").close(); loadServers().catch(() => {}); }
+    catch (err) { btn.disabled = false; btn.textContent = "지금 업데이트"; toast(err.message, true); }
+  } }, "지금 업데이트");
   put($("reportBody"),
     h("div", { class: "modal-head" }, h("h3", {}, `${n.name} 에이전트 업데이트 (${n.version || "?"} → ${latest})`),
       h("button", { class: "btn", type: "button", onclick: () => $("reportModal").close() }, "닫기")),
-    h("p", {}, "두 번에 나눠 실행합니다. 토큰·설정은 그대로 유지됩니다."),
-    h("p", {}, h("b", {}, "① 중앙서버 터미널에서"), ` (${location.hostname} 이 돌아가는 서버, ~/server-monitor 가 있는 곳) — 파일 보내기`),
-    copyBlock(`scp -r ~/server-monitor/node_agent ${dest}:~/`),
-    h("p", {}, h("b", {}, `② ${n.name} 터미널에서`), ` (ssh ${dest} 로 들어가서) — 에이전트 재설치 + 방화벽·업그레이드 도구 설치 (sudo 비밀번호 물어봄)`),
-    copyBlock(`bash ~/node_agent/install.sh ${DASHBOARD_TS_IP} && sudo bash ~/node_agent/install-blocker.sh`),
-    n.user ? null : h("p", { class: "muted" }, "계정 이름을 몰라 <사용자>로 남겼습니다 — 붙여넣기 전에 그 서버의 로그인 계정으로 바꾸세요."),
-    h("p", { class: "muted" }, "대시보드가 코드를 원격으로 밀어 넣는 방식은 일부러 만들지 않았습니다 — 토큰이 새면 그 서버에서 아무 코드나 실행되는 통로가 되기 때문입니다."));
+    h("p", {}, "중앙서버에서 SSH 키로 접속해 에이전트 파일을 보내고 다시 설치합니다. 토큰·설정은 그대로 유지됩니다."),
+    h("div", { class: "card-foot" }, btn, h("span", { class: "muted" }, "그 서버에 키 접속(ssh-copy-id)이 한 번 설정돼 있어야 해요")),
+    h("p", {}, h("b", {}, "터미널에서 하려면"), " (중앙서버에서 한 줄)"),
+    copyBlock(`~/server-monitor/scripts/update-agent.sh ${dest}`),
+    h("p", {}, h("b", {}, "방화벽·업그레이드·시스템 서비스 제어 도구(sm-block)까지"), " 업데이트하려면 — 그 서버의 sudo 비밀번호를 한 번 물어봐요"),
+    copyBlock(`~/server-monitor/scripts/update-agent.sh --blocker ${dest}`),
+    n.user ? null : h("p", { class: "muted" }, "계정 이름을 몰라 <사용자>로 남겼습니다 — 그 서버의 로그인 계정으로 바꾸세요."));
   $("reportModal").showModal();
 }
 async function upgradeServer(r) {

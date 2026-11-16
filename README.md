@@ -145,7 +145,14 @@ scp -r ~/server-monitor/node_agent <user>@<원격_Tailscale_IP>:~/
 # ② 원격 서버에서
 bash ~/node_agent/install.sh <중앙_Tailscale_IP>
 ```
-출력된 주소·토큰을 대시보드 **서버 목록 → 서버 추가**에 입력합니다. 다시 설치하면 토큰은 유지되고 새 버전으로 재시작됩니다(업데이트할 때도 같은 두 단계 — 대시보드가 명령을 복사 버튼과 함께 보여줍니다).
+출력된 주소·토큰을 대시보드 **서버 목록 → 서버 추가**에 입력합니다.
+
+**업데이트**: 중앙서버에서 그 서버로 SSH 키 접속을 한 번 설정해 두면(`ssh-copy-id user@host`), 이후로는
+```bash
+scripts/update-agent.sh sub                # 에이전트만 (비밀번호 없음) — 대시보드 "지금 업데이트" 버튼과 같음
+scripts/update-agent.sh --blocker sub      # sm-block 까지 (그 서버 sudo 비밀번호 1회)
+```
+토큰·설정은 그대로 유지됩니다.
 
 ### 5. 서버마다 sudo 1회
 | 스크립트 | 효과 |

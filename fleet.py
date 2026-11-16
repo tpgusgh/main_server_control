@@ -749,3 +749,41 @@ def _wire_ai():
 
 
 _wire_ai()
+
+
+# ---------------------------------------------------------------- agent update over SSH (key login)
+
+UPDATE_SCRIPT = monitor.BASE / "scripts" / "update-agent.sh"
+_updating: set[int] = set()
+
+
+@router.post("/api/fleet/update-agent/{nid}")
+async def update_agent(request: Request, nid: int):
+    """Push THIS repo's node_agent/ to that server and re-run its installer (scripts/update-agent.sh).
+    Needs SSH key login from this server; the sudo part (sm-block) is never run from here."""
+    require_auth(request)
+    node = _node(nid)
+    data = (hub.state.get(nid) or {}).get("data") or {}
+    user = data.get("user") or next((s.get("name") for s in (data.get("host_facts") or {}).get("sessions") or [] if s.get("name")), None)
+    host = node["address"].removeprefix("http://").rsplit(":", 1)[0].strip("[]")
+    if not user or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", user):
+        raise HTTPException(409, "그 서버의 계정 이름을 몰라요 — 터미널에서 scripts/update-agent.sh <user>@<주소> 로 실행하세요.")
+    if nid in _updating:
+        raise HTTPException(409, "이미 업데이트 중입니다.")
+    _updating.add(nid)
+    try:
+        proc = await asyncio.create_subprocess_exec("bash", str(UPDATE_SCRIPT), f"{user}@{host}",
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=180)
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "시간 초과 (3분)")
+    finally:
+        _updating.discard(nid)
+    text = out.decode(errors="replace").strip()
+    ok = f"server-agent {AGENT_LATEST} listening" in text
+    request.state.event, request.state.detail = "action", f"update agent {node['name']}"
+    await asyncio.to_thread(raise_alert, "upgrade", "", "", f"서버 '{node['name']}' 에이전트 업데이트 {'완료' if ok else '실패'} "
+                            f"→ {AGENT_LATEST}", 0, not ok)
+    if not ok:
+        raise HTTPException(409, text[-400:] or "실패")
+    return {"ok": True, "detail": text[-400:]}
