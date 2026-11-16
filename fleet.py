@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 import monitor
 from agent import TZ
-from core import confirm_password, db, local_name, raise_alert, require_auth
+from core import ALERT_TITLES, confirm_password, db, local_name, raise_alert, require_auth
 from node_agent import hostsec
 from routes_nodes import hub
 
@@ -324,6 +324,13 @@ def energy_view() -> dict:
             "total_projected_won": sum(r["projected_won"] or 0 for r in rows)}
 
 
+def energy_for_ai() -> dict:
+    v = energy_view()
+    return {"단가_원per_kWh": v["price"], "이번달_합계_원": v["total_month_won"], "한달예상_원": v["total_projected_won"],
+            "서버별": [{"서버": r["name"], "지금_W": r["watts_now"], "이번달_kWh": r["month_kwh"], "이번달_원": r["month_won"],
+                     "한달예상_원": r["projected_won"]} for r in v["rows"]]}
+
+
 # ---------------------------------------------------------------- scheduled reboots
 
 def next_run(kind: str, hhmm: str, weekday: int | None = None, date: str | None = None, now: datetime | None = None):
@@ -398,6 +405,46 @@ def send_monthly(month: str):
     _kv("monthly", month)
 
 
+def weekly_due() -> str | None:
+    """Monday 09:00 KST or later, once per ISO week."""
+    now = datetime.now(TZ)
+    key = now.strftime("%G-W%V")
+    return key if now.weekday() == 0 and now.hour >= 9 and _kv("weekly") != key else None
+
+
+def weekly_text(now: datetime | None = None) -> str:
+    """Last Monday–Sunday in numbers: uptime, power cost, alerts, bans, AI investigations (no AI tokens)."""
+    now = now or datetime.now(TZ)
+    end = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now.weekday())
+    start = end - timedelta(days=7)
+    d0, d1, t0, t1 = start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"), int(start.timestamp()), int(end.timestamp())
+    names, price = server_names(), power_cfg()["price"]
+    since = int(_kv("since") or t0)
+    lines = [f"{start:%m/%d}~{(end - timedelta(days=1)):%m/%d} 한 주 요약"]
+    for r in db("SELECT server, SUM(up) up, SUM(known) known, SUM(outages) o FROM uptime_daily WHERE day>=? AND day<? "
+                "GROUP BY server", (d0, d1)):
+        if r["server"] in names:
+            base = max(1, t1 - max(t0, since)) if r["server"] == MAIN else max(1, r["known"])
+            lines.append(f"가동률 {names[r['server']]}: {min(100, r['up'] / base * 100):.2f}% · 끊김 {r['o']}회")
+    kwh = {r["server"]: (r["wh"] or 0) / 1000 for r in
+           db("SELECT server, SUM(wh) wh FROM power_daily WHERE day>=? AND day<? GROUP BY server", (d0, d1))}
+    if kwh:
+        lines.append(f"전력 {sum(kwh.values()):.1f} kWh · 약 {round(sum(kwh.values()) * price):,}원 ("
+                     + ", ".join(f"{names.get(k, k)} {v:.1f}" for k, v in kwh.items()) + ")")
+    al = db("SELECT kind, COUNT(*) n FROM alerts WHERE ts>=? AND ts<? GROUP BY kind ORDER BY n DESC LIMIT 5", (t0, t1))
+    if al:
+        lines.append("알림 " + ", ".join(f"{ALERT_TITLES.get(r['kind'], r['kind'])} {r['n']}" for r in al))
+    bans = db("SELECT COUNT(*) n FROM bans WHERE ts>=? AND ts<?", (t0, t1), one=True)["n"]
+    try:
+        cases = {r["verdict"]: r["n"] for r in db("SELECT verdict, COUNT(*) n FROM ai_cases WHERE ts>=? AND ts<? "
+                                                  "AND status='done' GROUP BY verdict", (t0, t1))}
+    except Exception:  # secops not loaded (tests)
+        cases = {}
+    lines.append(f"새 영구 차단 {bans}건 · AI 조사 {sum(cases.values())}건"
+                 + (f" (공격 {cases.get('malicious', 0)}, 확인 필요 {cases.get('suspicious', 0)})" if cases else ""))
+    return "\n".join(lines)
+
+
 async def loop():
     ledger = Ledger()
     await asyncio.to_thread(ledger.start)
@@ -420,6 +467,10 @@ async def loop():
                         await asyncio.to_thread(raise_alert, "disk_forecast", "", "",
                                                 f"서버 '{f['name']}' 디스크가 약 {f['days_left']:.0f}일 뒤 {FULL_AT:.0f}%에 도달 "
                                                 f"(지금 {f['now']}%, 하루 +{f['per_day']}%)", 86400)
+            week = await asyncio.to_thread(weekly_due)
+            if week:
+                await asyncio.to_thread(raise_alert, "weekly", "", "", await asyncio.to_thread(weekly_text))
+                await asyncio.to_thread(_kv, "weekly", week)
             month = await asyncio.to_thread(monthly_report_due)
             if month:
                 await asyncio.to_thread(send_monthly, month)
@@ -690,3 +741,11 @@ def power_schedule_delete(request: Request, body: JobDelBody):
     db("DELETE FROM power_jobs WHERE id=?", (body.id,))
     request.state.event, request.state.detail = "action", f"delete reboot schedule {body.id}"
     return {"ok": True}
+
+
+def _wire_ai():
+    import routes_ai  # late: routes_ai doesn't import fleet, so no cycle
+    routes_ai.analyst.energy_fn = energy_for_ai
+
+
+_wire_ai()

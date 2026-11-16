@@ -31,7 +31,7 @@
 <main>
   <div class="view-banner hidden" id="viewBanner" role="status">
     <span>지금 보는 서버: <b id="vbName"></b> <span class="muted mono" id="vbAddr"></span></span>
-    <span class="muted">모든 탭이 이 서버 기준으로 바뀌었습니다 · AI는 본체의 LLM을 씁니다</span>
+    <span class="muted">모든 탭이 이 서버 기준으로 바뀌었습니다 · AI는 중앙서버의 Claude가 이 서버 데이터로 답합니다</span>
     <button class="btn" id="vbBack" type="button">본체로 돌아가기</button>
   </div>
   <!-- ============ 개요 ============ -->
@@ -145,7 +145,7 @@
           <button class="btn" type="submit">추가</button>
         </form>
         <div class="table-wrap"><table>
-          <thead><tr><th>이름</th><th>주소</th><th>상태</th><th class="r">응답</th><th>마지막 확인</th><th>상태 지속</th><th></th></tr></thead>
+          <thead><tr><th>이름</th><th>주소</th><th>상태</th><th class="r">응답</th><th>인증서</th><th>마지막 확인</th><th>상태 지속</th><th></th></tr></thead>
           <tbody id="siteRows"></tbody>
         </table></div>
       </div>
@@ -175,7 +175,10 @@
           <button class="btn" id="ndRename">정보 수정</button><button class="btn danger" id="ndDelete">목록에서 삭제</button></div>
       </div>
       <div class="grid tiles" id="ndTiles"></div>
-      <div class="section-title"><h2>최근 24시간</h2></div>
+      <div class="section-title"><h2>부하 기록</h2><span class="sub">10초 간격 수집 · 최근 24시간 보관</span>
+        <div class="right"><div class="seg" id="ndRange">
+          <button data-h="1">1시간</button><button data-h="6">6시간</button><button data-h="24" aria-pressed="true">24시간</button>
+        </div></div></div>
       <div class="grid charts">
         <div class="card chart-card"><div class="chart-head"><h3>CPU 사용률</h3><span class="peak" id="ndCpuPeak"></span></div><div class="chart" id="ndChartCpu"></div></div>
         <div class="card chart-card"><div class="chart-head"><h3>메모리 사용률</h3><span class="peak" id="ndMemPeak"></span></div><div class="chart" id="ndChartMem"></div></div>
@@ -183,6 +186,11 @@
         <div class="card chart-card"><div class="chart-head"><h3>로드 평균 (1분)</h3><span class="peak" id="ndLoadPeak"></span></div><div class="chart" id="ndChartLoad"></div></div>
       </div>
       <p class="muted" id="ndScope"></p>
+      <div class="section-title"><h2>고부하 발생 시각</h2><span class="sub" id="ndThresholds"></span></div>
+      <div class="card">
+        <div class="peaks" id="ndPeaks"></div>
+        <ul class="events" id="ndEvents"></ul>
+      </div>
       <div class="grid two">
         <div>
           <div class="section-title"><h2>상위 프로세스</h2><span class="sub">CPU 순</span></div>
@@ -211,7 +219,7 @@
 
   <!-- ============ 서비스 ============ -->
   <section data-panel="services" class="hidden">
-    <div class="section-title"><h2>서버 (systemd 사용자 서비스)</h2><span class="sub">~/.config/systemd/user 에 등록된 서비스</span>
+    <div class="section-title"><h2>서비스</h2><span class="sub">사용자 서비스(~/.config/systemd/user)는 제어 · 실행 중이거나 실패한 시스템 서비스는 보기 전용</span>
       <div class="right"><button class="btn" id="svcRefresh">새로고침</button></div></div>
     <div class="card table-wrap"><table>
       <thead><tr><th>서비스</th><th>상태</th><th>PID</th><th class="r">메모리</th><th>실행 시작</th><th class="r">재시작 횟수</th><th>부팅 시 자동 실행</th><th class="r">제어</th></tr></thead>
@@ -317,21 +325,40 @@
     </div>
 
     <div data-aiview="chat" class="hidden">
-      <div class="section-title"><h2>AI에게 질문</h2><span class="sub">서버가 집계한 최근 24시간 데이터로 답합니다 · AI는 아무것도 실행하지 않습니다</span></div>
-    <div class="card chat">
-      <div class="chat-log" id="chatLog" aria-live="polite"></div>
-      <div class="chat-suggest" id="chatSuggest">
-        <button class="btn" data-q="오늘 보안상 주의할 점 있어?">오늘 보안상 주의할 점 있어?</button>
-        <button class="btn" data-q="최근 24시간 중 언제 부하가 제일 높았고 원인이 뭐야?">언제 부하가 제일 높았어?</button>
-        <button class="btn" data-q="로그인 실패한 IP들 위험해 보여?">로그인 실패 IP 위험해?</button>
+      <div class="chat-layout">
+        <section class="card chat-panel" aria-label="AI 대화">
+          <header class="chat-head">
+            <div class="chat-title"><span class="ai-avatar" aria-hidden="true">AI</span>
+              <div><b>서버 AI 비서</b><div class="muted" id="chatTarget">중앙서버 데이터로 답합니다 · 아무것도 실행하지 않습니다</div></div></div>
+            <button class="btn" type="button" id="chatNew">새 대화</button>
+          </header>
+          <div class="chat-log" id="chatLog" aria-live="polite"></div>
+          <div class="chat-empty" id="chatSuggest">
+            <div class="chat-hello">무엇이 궁금하세요?</div>
+            <div class="muted">서버 상태·보안·접속 기록을 실제 데이터로 답해요. “기억해: …” 라고 말하면 기억합니다.</div>
+            <div class="chips">
+              <button class="chip" type="button" data-q="지금 서버 상태 한 줄로 요약해줘">지금 상태 요약</button>
+              <button class="chip" type="button" data-q="오늘 보안상 주의할 점 있어?">오늘 보안 주의점</button>
+              <button class="chip" type="button" data-q="최근 24시간 중 언제 부하가 제일 높았고 원인이 뭐야?">부하가 높았던 때</button>
+              <button class="chip" type="button" data-q="로그인 실패한 IP들 위험해 보여?">로그인 실패 IP</button>
+              <button class="chip" type="button" data-q="실패하거나 자주 재시작하는 서비스 있어?">문제 있는 서비스</button>
+              <button class="chip" type="button" data-q="다른 서버들 상태도 비교해줘">서버 비교</button>
+            </div>
+          </div>
+          <form class="chat-composer" id="chatForm">
+            <textarea class="input" id="chatInput" rows="1" maxlength="500" placeholder="메시지 보내기 (Enter 전송 · Shift+Enter 줄바꿈)" aria-label="AI에게 보낼 메시지"></textarea>
+            <button class="btn primary send" id="chatSend" type="submit" aria-label="보내기">↑</button>
+          </form>
+        </section>
+        <aside class="card chat-side" aria-label="지난 대화">
+          <div class="chat-side-head"><b>지난 대화</b><span class="muted" id="chatsMeta"></span></div>
+          <input class="input" id="chatsQ" placeholder="대화 검색" maxlength="50">
+          <ul class="chat-history" id="chatHistory"></ul>
+          <div class="pager"><button class="btn" id="chatsPrev">이전</button><button class="btn" id="chatsNext">다음</button></div>
+        </aside>
       </div>
-      <form class="chat-form" id="chatForm">
-        <textarea class="input" id="chatInput" rows="2" maxlength="500" placeholder="예) 203.0.113.7 접속 기록 요약해줘 · “기억해: …” 라고 하면 기억합니다"></textarea>
-        <button class="btn primary" id="chatSend" type="submit">보내기</button>
-      </form>
-    </div>
 
-    <div class="grid two">
+      <div class="grid two">
       <div>
         <div class="section-title"><h2>AI의 기억</h2><span class="sub" id="memMeta"></span></div>
         <div class="card">
@@ -352,14 +379,7 @@
           <ul class="mem-list" id="lessonList"></ul>
         </div>
       </div>
-      <div>
-        <div class="section-title"><h2>대화 기록</h2><span class="sub" id="chatsMeta"></span>
-          <div class="right"><input class="input" id="chatsQ" placeholder="검색" maxlength="50"></div></div>
-        <div class="card"><ul class="chat-history" id="chatHistory"></ul>
-          <div class="pager"><button class="btn" id="chatsPrev">이전</button><button class="btn" id="chatsNext">다음</button></div></div>
       </div>
-    </div>
-
     </div>
 
     <div data-aiview="log" class="hidden">

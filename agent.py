@@ -250,6 +250,7 @@ class Analyst:
                  nodes_fn=lambda start=None, end=None: [], local_name_fn=lambda: "", fixers=None,
                  node_fn=lambda nid: (None, None), node_ids_fn=lambda: [], sites_fn=lambda: []):
         self.node_ids_fn, self.sites_fn = node_ids_fn, sites_fn
+        self.energy_fn = lambda: None  # set by fleet: estimated power use and electricity cost
         self.nodes_fn, self.local_name_fn, self.fixers, self.node_fn = nodes_fn, local_name_fn, fixers or {}, node_fn
         self._handled: dict[str, int] = {}
         self._backoff: dict[tuple, float] = {}  # failed job -> don't retry before this time
@@ -349,7 +350,8 @@ class Analyst:
             "고부하구간": [{"시작": kst(e["start"]), "끝": kst(e["end"]), "원인": e["reasons"],
                        "cpu최대": round(e["cpu_max"]), "온도최대": round(e["temp_max"])} for e in ev["events"][:8]],
             "상위프로세스": [{"name": p["name"], "cpu%": p["cpu"], "mem%": p["mem"]} for p in st["top"][:6]],
-            "서비스": [{"unit": s["unit"], "상태": s["active"], "부팅자동실행": s["enabled"]} for s in self.services_fn()],
+            "서비스": [{"unit": s["unit"], "상태": s["active"], "부팅자동실행": s["enabled"],
+                      **({} if s.get("controllable", True) else {"제어": "보기전용(시스템)"})} for s in self.services_fn()],
             "인증_24시간": {"로그인성공": auth["ok"] or 0, "로그인실패": auth["fail"] or 0,
                         "차단IP의재접근": auth["banned_hits"] or 0, "Access/CSRF거부": auth["denied"] or 0,
                         "비인증요청": auth["anon"] or 0},
@@ -366,6 +368,7 @@ class Analyst:
             "활성세션수": sessions,
             "다른서버(Tailscale)": self.nodes_fn(),
             "웹사이트감시": self.sites_fn(),
+            "전력_추정(CPU기반)": self.energy_fn(),
             "보안설정": {"cloudflare_access": cfg["cf_access"], "2단계인증": cfg["totp"],
                      "신뢰IP수": cfg["trusted_count"], "차단기준": "비밀번호 3회 실패 시 영구차단(신뢰IP 제외)"},
         }
@@ -755,7 +758,8 @@ class Analyst:
                               "신뢰IP": self.is_trusted(r["ip"])} for r in top_fail],
             "알림": alerts_by,
             "관리자작업": [{"시각": kst(r["ts"]), "작업": safe_path(r["detail"].replace(" ", "_"))} for r in actions],
-            "서비스": [{"unit": s["unit"], "상태": s["active"], "재시작횟수": s["restarts"]} for s in self.services_fn()],
+            "서비스": [{"unit": s["unit"], "상태": s["active"], "재시작횟수": s["restarts"],
+                      **({} if s.get("controllable", True) else {"제어": "보기전용(시스템)"})} for s in self.services_fn()],
             "다른서버": self.nodes_fn(start, end),
         }
 
@@ -940,9 +944,14 @@ class Analyst:
         """Rules decide what is red. Fixable items become candidates; the rest can only be reported."""
         now, cands, issues = int(time.time()), [], []
         for sv in self.services_fn():
-            if sv["active"] == "failed" and sv["unit"] not in IGNORE_FAILED:
+            if sv["active"] != "failed" or sv["unit"] in IGNORE_FAILED:
+                continue
+            if sv.get("controllable", True):
                 cands.append({"id": f"restart_local:{sv['unit']}", "type": "restart_local", "target": sv["unit"],
                               "server": self.local_name_fn(), "desc": f"이 서버의 {sv['unit']} 이(가) 실패 상태 → 재시작"})
+            else:  # system service: restarting needs root, so it can only be reported
+                issues.append({"id": f"sysfail:{sv['unit']}", "text": f"이 서버의 시스템 서비스 {sv['unit']} 실패 — "
+                               f"root 권한이 필요해 자동 재시작 불가 (sudo systemctl restart {sv['unit']})"})
         probs = self.fixers["node_problems"]() if "node_problems" in self.fixers else {"failed": [], "issues": []}
         for f in probs["failed"]:
             cands.append({"id": f"restart_node:{f['id']}:{f['unit']}", "type": "restart_node", "node": f["id"],

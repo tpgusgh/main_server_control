@@ -456,3 +456,4 @@ class UpgradeRefresh(unittest.TestCase):
         self.assertFalse(hostsec.upgraded_since(1001), "read after → fresh")
         hostsec.upgrade_status = lambda: None
         self.assertFalse(hostsec.upgraded_since(0), "no sm-block → never stale")
+

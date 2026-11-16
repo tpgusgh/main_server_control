@@ -10,6 +10,8 @@ import socket
 import sqlite3
 import threading
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from fastapi import HTTPException, Request
@@ -196,17 +198,41 @@ ALERT_TITLES = {"new_ip": "🔔 새 IP 로그인", "login_fail": "⚠️ 로그�
                 "config_change": "🧩 서버 설정 변경", "disk_forecast": "💽 디스크 가득 참 예상", "monthly": "📈 월간 가동률",
                 "upgrade": "📦 패키지 업그레이드", "ai_case": "🔎 AI 보안 조사 결과",
                 "exposure": "🌍 인터넷에 공개된 주소", "guard": "🧱 외부 차단 설정 변경",
-                "reboot": "🔄 서버 재부팅 완료"}
+                "reboot": "🔄 서버 재부팅 완료", "cert_expiry": "🔐 SSL 인증서 만료 임박", "weekly": "🗓️ 주간 리포트"}
 ALERT_LEVEL = {"ban": "critical", "login_fail": "critical", "node_down": "critical", "needs_you": "critical",
                "new_ip": "warning", "node_hot": "warning", "power": "warning",
                "unban": "good", "node_up": "good", "ai_fix": "good", "site_down": "critical", "site_up": "good",
                "login_risk": "critical", "ai_risk": "warning",
                "config_change": "warning", "disk_forecast": "warning", "monthly": "info", "upgrade": "info", "ai_case": "critical",
-               "exposure": "critical", "guard": "warning", "reboot": "good"}
+               "exposure": "critical", "guard": "warning", "reboot": "good", "cert_expiry": "warning", "weekly": "info"}
 
 def unblock_button(key: str) -> list:
     """Discord button under a block alert (discord_bot.py asks for confirmation before acting)."""
     return [{"type": 1, "components": [{"type": 2, "style": 4, "label": "차단 풀기", "custom_id": f"unblock:{key}"[:100]}]}]
+
+
+SEVERITY_LABEL = {"critical": "🔴 즉시 확인", "warning": "🟠 주의", "good": "🟢 정상", "info": "🔵 정보"}
+ALERT_TZ = ZoneInfo(os.environ.get("SM_TZ", "Asia/Seoul"))
+SERVER_RE = re.compile(r"서버 '([^']{1,40})'")
+
+
+def discord_body(kind: str, message: str) -> tuple[str, str]:
+    """Readable card: the server in the title, the first line as a bold headline, the rest as short bullets."""
+    title = ALERT_TITLES.get(kind, kind)
+    m = SERVER_RE.search(message)
+    if m:
+        title += f" · {m.group(1)}"
+        message = message.replace(m.group(0), m.group(1), 1)
+    lines = [l.strip() for l in message.split("\n") if l.strip()]
+    if not lines:
+        return title, ""
+    head = lines[0].replace(" — ", "\n", 1)  # "what happened — details" → headline, then details
+    first, _, rest0 = head.partition("\n")
+    rest = ([rest0] if rest0 else []) + lines[1:]
+    body = f"**{first}**" + ("\n" + "\n".join(f"• {l}" for l in rest) if rest else "")
+    if len(body) > 700:
+        body = body[:680].rsplit("\n", 1)[0] + "\n… 대시보드에서 전체 보기"
+    return title, body
 
 
 def raise_alert(kind: str, ip: str, country: str, message: str, throttle: int = 0, push: bool = True,
@@ -220,18 +246,17 @@ def raise_alert(kind: str, ip: str, country: str, message: str, throttle: int = 
     db("INSERT INTO alerts(ts,kind,ip,country,message) VALUES(?,?,?,?,?)", (int(now), kind, ip, country, message[:300]))
     label = f" ({IP_LABELS[ip]})" if ip in IP_LABELS else ""
     if push:
-        title = ALERT_TITLES.get(kind, kind)
-        lines = [l for l in message.split("\n") if l.strip()]
-        body = "\n".join(f"• {l}" for l in lines) if len(lines) > 1 else message
+        level = ALERT_LEVEL.get(kind, "info")
+        title, body = discord_body(kind, message)
         is_ip = bool(ip) and not ip.startswith("http")  # node alerts carry the agent URL, not a client IP
         flag = "".join(chr(0x1F1E6 + ord(c) - 65) for c in country) if len(country) == 2 and country.isalpha() else ""
-        alerts.push(f"{title} · {PUBLIC_HOST}\nIP: {ip}{label} [{country or '?'}]\n{message}\n"
-                    f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}",
-                    alerts.card(title, body, ALERT_LEVEL.get(kind, "info"),
-                                [("IP", f"`{ip}`{label}" if is_ip else None, True),
-                                 ("국가", f"{flag} {country}".strip() if country else None, True),
-                                 ("서버", ip.removeprefix("http://") if not is_ip and ip else None, True)],
-                                footer=PUBLIC_HOST),
+        kst = datetime.fromtimestamp(now, ALERT_TZ).strftime("%m-%d %H:%M")
+        alerts.push(f"{title} · {PUBLIC_HOST}\nIP: {ip}{label} [{country or '?'}]\n{message}\n{kst} KST",
+                    alerts.card(title, body, level,
+                                [("심각도", SEVERITY_LABEL.get(level, "🔵 정보"), True),
+                                 ("IP", f"`{ip}`{label}" if is_ip else None, True),
+                                 ("국가", f"{flag} {country}".strip() if country else None, True)],
+                                footer=f"{PUBLIC_HOST} · {kst} KST", url=f"https://{PUBLIC_HOST}/"),
                     components or (unblock_button(ban_key(ip)) if kind in ("ban", "ai_fix") and is_ip else None))
 
 
