@@ -461,7 +461,8 @@ const ALERT_KIND = { new_ip: ["새 IP 로그인", "warn"], login_fail: ["로그�
   power: ["전원 조작", "warn"], site_down: ["사이트 다운", "crit"], site_up: ["사이트 복구", "good"],
   login_risk: ["수상한 로그인", "crit"], ai_risk: ["AI 위험 감지", "warn"],
   config_change: ["설정 변경", "warn"], disk_forecast: ["디스크 예측", "warn"], monthly: ["월간 가동률", ""],
-  upgrade: ["업그레이드", ""], ai_case: ["AI 조사", "crit"], cert_expiry: ["인증서 만료", "warn"], weekly: ["주간 리포트", ""], net_down: ["중앙서버 네트워크", "warn"], upload_surge: ["업로드 급증", "warn"], exposure: ["인터넷 공개", "crit"], guard: ["외부 차단 설정", "warn"],
+  upgrade: ["업그레이드", ""], ai_case: ["AI 조사", "crit"], cert_expiry: ["인증서 만료", "warn"], weekly: ["주간 리포트", ""], net_down: ["중앙서버 네트워크", "warn"], upload_surge: ["업로드 급증", "warn"],
+  kernel_event: ["서버 이상 징후", "warn"], disk_warn: ["디스크 주의", "warn"], disk_crit: ["디스크 위험", "crit"], exposure: ["인터넷 공개", "crit"], guard: ["외부 차단 설정", "warn"],
   reboot: ["재부팅 완료", "good"] };
 
 async function unbanIp(b) {
@@ -1349,6 +1350,35 @@ $("jobForm").addEventListener("submit", async (e) => {
   } catch (err) { toast(err.message, true); }
 });
 
+const KERNEL_SHORT = { oom: "메모리 부족", disk: "디스크 오류", hardware: "하드웨어 오류", thermal: "과열" };
+async function loadHealth() {
+  const { rows, kernel } = await api("/api/health");
+  const body = [];
+  for (const r of rows) {
+    const sm = r.smart;
+    const note = !sm ? "아직 점검 정보가 없어요 — 최신 에이전트와 sm-block(install-blocker.sh)이 필요해요"
+      : !sm.installed ? "smartmontools 가 설치돼 있지 않아요 — sudo apt install smartmontools 후 한 시간 안에 표시돼요"
+      : !sm.devices.length ? "점검할 디스크가 없어요" : null;
+    if (note) { body.push(h("tr", {}, h("td", {}, h("b", {}, r.name)), h("td", { colspan: "6", class: "muted" }, note))); continue; }
+    for (const d of sm.devices) {
+      const cls = d.level === "crit" ? "crit" : d.level === "warn" ? "warn" : "good";
+      body.push(h("tr", {}, h("td", {}, h("b", {}, r.name)),
+        h("td", {}, h("span", { class: "mono" }, d.dev), d.model ? h("div", { class: "muted" }, d.model) : null),
+        h("td", {}, h("span", { class: `pill ${cls}` }, d.level === "crit" ? "위험" : d.level === "warn" ? "주의" : "정상")),
+        h("td", { class: "r num" }, d.wear != null ? `${d.wear}%` : "–"), h("td", { class: "r num" }, d.temp != null ? `${d.temp}°C` : "–"),
+        h("td", { class: "r num" }, d.hours != null ? `${d.hours.toLocaleString("ko-KR")}시간` : "–"),
+        h("td", { class: d.notes.length ? "" : "muted" }, d.notes.length ? d.notes.join(" · ") : "이상 없음")));
+    }
+  }
+  fill($("diskRows"), body, 7, "");
+  put($("bootView"), rows.map((r) => h("div", { class: "boot-row" }, h("b", {}, r.name),
+    r.boot ? h("span", { class: "muted" }, ` · ${fmtDateTime(r.boot.time)} 부팅`) : h("span", { class: "muted" }, " · 부팅 정보 없음 (에이전트 2.6 필요)"),
+    r.boot ? h("ul", { class: "plain" }, r.boot.lines.map((l) => h("li", {}, l))) : null)));
+  fill($("kernelRows"), kernel.map((e) => h("tr", {}, h("td", { class: "num" }, fmtDateTime(e.ts)), h("td", {}, e.name),
+    h("td", {}, h("span", { class: "pill warn" }, KERNEL_SHORT[e.kind] || e.kind)), h("td", { class: "ellipsis mono", title: e.line }, e.line))),
+    4, "최근 이상 징후가 없어요 ✅");
+}
+
 async function loadNetQuality() {
   const { rows } = await api("/api/netquality");
   fill($("netRows"), rows.map((r) => {
@@ -1428,7 +1458,7 @@ async function loadServers() {
     DASHBOARD_TS_IP = d.local.ts_ip;
     $("installCmd").textContent = `bash ~/node_agent/install.sh ${DASHBOARD_TS_IP}`;
   }
-  if (currentNode == null && !$("serverListView").classList.contains("hidden")) { loadFleet(d).catch(() => {}); loadNetQuality().catch(() => {}); }
+  if (currentNode == null && !$("serverListView").classList.contains("hidden")) { loadFleet(d).catch(() => {}); loadNetQuality().catch(() => {}); loadHealth().catch(() => {}); }
   const local = h("div", { class: "local-wrap" }, serverCard(d.local, true),
     h("button", { class: "link-btn", onclick: (e) => { e.stopPropagation(); editServer(d.local, true); } }, "정보 수정"));
   $("serverCards").replaceChildren(local, ...d.nodes.map((n) => serverCard(n, false)));

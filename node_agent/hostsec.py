@@ -574,3 +574,109 @@ def internet_ok(timeout: float = 2.0) -> tuple[bool, float | None]:
         except OSError:
             continue
     return False, None
+
+
+# ---------------------------------------------------------------- boot, kernel and disk health
+
+def _secs(text: str) -> float:
+    """'2min 3.670s' → 123.67 (systemd's duration notation)."""
+    units = {"h": 3600, "min": 60, "s": 1, "ms": 0.001}
+    return sum(float(n) * units[u] for n, u in re.findall(r"(\d+(?:\.\d+)?)\s*(h|min|ms|s)\b", text))
+
+
+def parse_boot(analyze: str, chain: str, failed: list) -> dict:
+    """`systemd-analyze time` + `critical-chain` + (unit, seconds-it-ran-before-failing) → one dict. The unit that
+    really delays a boot (e.g. wait-online timing out) is often missing from `blame`/`critical-chain`, which is why
+    failed units carry their own duration."""
+    out = {"parts": {}, "failed": [{"unit": u, "secs": s} for u, s in failed], "slow": []}
+    m = re.search(r"Startup finished in (.+)", analyze)
+    if m:
+        body, _, total = m.group(1).partition(" = ")
+        out["total_s"] = round(_secs(total), 1)
+        for seg in body.split(" + "):
+            mm = re.match(r"(.+?)\s*\((\w+)\)", seg.strip())
+            if mm:
+                out["parts"][mm.group(2)] = round(_secs(mm.group(1)), 1)
+    time_re = r"(?:[\d.]+(?:min|ms|s|h)\s*)+"
+    slow = {}
+    for mm in re.finditer(rf"([\w@.\-]+\.(?:service|mount|socket|target|device))\s+@{time_re}\+\s*({time_re})", chain):
+        secs = _secs(mm.group(2))
+        if secs >= 3:
+            slow[mm.group(1)] = round(secs, 1)
+    out["slow"] = sorted(slow.items(), key=lambda kv: -kv[1])[:3]
+    return out
+
+
+def boot_info() -> dict | None:
+    """This boot's timing and the units that failed. None while boot is still in progress."""
+    import time
+    analyze = _run(["systemd-analyze", "time"], timeout=20)
+    if "Startup finished" not in analyze:
+        return None
+    failed = []
+    for line in _run(["systemctl", "--failed", "--no-legend", "--plain"]).splitlines():
+        unit = line.split()[0] if line.split() else ""
+        if not unit.endswith(".service"):
+            continue
+        show = dict(l.split("=", 1) for l in _run(["systemctl", "show", unit, "-p", "ExecMainStartTimestampMonotonic",
+                                                     "-p", "ExecMainExitTimestampMonotonic"]).splitlines() if "=" in l)
+        try:
+            a, b = int(show.get("ExecMainStartTimestampMonotonic") or 0), int(show.get("ExecMainExitTimestampMonotonic") or 0)
+        except ValueError:
+            a = b = 0
+        failed.append((unit, round((b - a) / 1e6, 1) if a and b > a else 0.0))
+    info = parse_boot(analyze, _run(["systemd-analyze", "critical-chain", "--no-pager"], timeout=20), failed)
+    info["boot_time"] = int(time.time() - float(_read("/proc/uptime", "0 0").split()[0]))
+    return info
+
+
+KERNEL_RULES = [
+    ("oom", re.compile(r"out of memory|oom-kill|invoked oom-killer|killed process \d+|due to memory pressure", re.I)),
+    ("disk", re.compile(r"i/o error|ext4-fs error|xfs.*(error|corruption)|btrfs.*(error|corrupt)|"
+                        r"nvme\d+.*(timeout|reset controller|abort)|ata\d+(\.\d+)?: .*(failed command|error|exception)", re.I)),
+    ("hardware", re.compile(r"machine check|hardware error|\bmce:|edac .*(error|\bue\b|\bce\b)", re.I)),
+    ("thermal", re.compile(r"(thermal|temperature).*(throttl|above threshold)|cpu clock throttled", re.I)),
+]
+# journalctl -g filters on the server side, so firewall-log floods never reach us
+KERNEL_GREP = ("out of memory|oom-kill|oom-killer|killed process|i/o error|fs error|nvme.*(timeout|reset|abort)|"
+               "ata[0-9].*(failed|error|exception)|machine check|hardware error|mce:|edac|throttl|above threshold")
+
+
+def classify_kernel(lines: list) -> list:
+    """journalctl `-o short-unix` lines → [{"ts", "kind", "line"}] for the few messages that mean trouble."""
+    out = []
+    for line in lines:
+        ts, _, rest = line.partition(" ")
+        try:
+            t = int(float(ts))
+        except ValueError:
+            continue
+        msg = rest.split(": ", 1)[-1]
+        for kind, rx in KERNEL_RULES:
+            if rx.search(msg):
+                out.append({"ts": t, "kind": kind, "line": " ".join(msg.split())[:200]})
+                break
+    return out
+
+
+def kernel_events(hours: int = 1) -> dict:
+    kern = _run(["journalctl", "-k", "--since", f"-{hours}h", "-g", KERNEL_GREP, "--no-pager", "-o", "short-unix", "-n", "400"], timeout=20)
+    oomd = _run(["journalctl", "-u", "systemd-oomd", "--since", f"-{hours}h", "-g", "killed", "--no-pager", "-o", "short-unix", "-n", "50"], timeout=20)
+    events = sorted(classify_kernel(kern.splitlines()) + classify_kernel(oomd.splitlines()), key=lambda e: e["ts"])[-40:]
+    counts = {}
+    for e in events:
+        counts[e["kind"]] = counts.get(e["kind"], 0) + 1
+    return {"events": events, "counts": counts}
+
+
+def request_smart():
+    """Ask root sm-block to read every disk's SMART data (needs smartmontools); read the answer with smart_status()."""
+    return _request({"op": "smart"}, wait=25.0)
+
+
+def smart_status():
+    try:
+        with open(f"{SM_DIR}/public.json") as f:
+            return json.load(f).get("smart")
+    except (OSError, ValueError):
+        return None

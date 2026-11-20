@@ -504,3 +504,4 @@ table.fleet td.actions { display: flex; gap: 6px; justify-content: flex-end; }
 .chat-actions { display: grid; gap: 6px; margin-top: 8px; padding: 10px 12px; border: 1px dashed var(--border); border-radius: 12px; }
 .chat-action { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 12.5px; }
 #confirmText { white-space: pre-line; }
+.boot-row { padding: 6px 0; } .boot-row + .boot-row { border-top: 1px solid var(--border); } .boot-row ul.plain { margin: 4px 0 0; }
