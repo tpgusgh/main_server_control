@@ -12,6 +12,8 @@ import threading
 import time
 from pathlib import Path
 
+import uxrules
+
 import psutil
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -261,7 +263,11 @@ def system_units(include_stopped: bool = False) -> list[str]:
                            capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return []
-    return sorted({l.split()[0] for l in r.stdout.splitlines() if l.split() and UNIT_RE.match(l.split()[0])})[:100]
+    names = {l.split()[0] for l in r.stdout.splitlines() if l.split() and UNIT_RE.match(l.split()[0])}
+    if include_stopped:  # a stopped service is unloaded, so list-units forgets it; admin-made unit files remain
+        admin = uxrules.admin_unit_files()  # --all lists 200+ units; the cap must not cut these off
+        return sorted(admin) + sorted(names - admin)[:max(0, 100 - len(admin))]
+    return sorted(names)[:100]
 
 
 def _show_units(units: list[str], system: bool) -> list[dict]:
@@ -303,7 +309,7 @@ def services_data():
     """User services (controllable) + running/failed system services (view-only: changing them needs root)."""
     units = managed_units()
     out = _show_units(units, False) if units else []
-    sysu = [u for u in system_units() if u not in units]
+    sysu = [u for u in system_units(include_stopped=True) if u not in units]
     out += _show_units(sysu, True) if sysu else []
     try:
         linger = subprocess.run(["loginctl", "show-user", str(os.getuid()), "-p", "Linger", "--value"],
