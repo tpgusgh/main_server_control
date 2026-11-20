@@ -344,6 +344,9 @@ def system_units():
     """Running or failed system services (web servers, databases, docker, ...)."""
     res = systemctl_as(True, "list-units", "--type=service", "--state=running,failed", "--no-legend", "--plain")
     names = {line.split()[0] for line in res.stdout.splitlines() if line.split() and UNIT_RE.match(line.split()[0])}
+    # a stopped service is unloaded and vanishes from list-units; admin-made unit files keep it startable
+    names |= {p.name for p in Path("/etc/systemd/system").glob("*.service")
+              if p.is_file() and not p.is_symlink() and UNIT_RE.match(p.name)}
     return sorted(names)[:100]
 
 

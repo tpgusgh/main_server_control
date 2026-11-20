@@ -1,5 +1,6 @@
 """Pure rules for notifications, the activity history and the Discord commands (no database, no network)."""
 import re
+from pathlib import Path
 
 VERB_KR = {"start": "서비스 켜기", "stop": "서비스 끄기", "restart": "서비스 다시 켜기",
            "enable": "부팅 시 자동 실행 켜기", "disable": "부팅 시 자동 실행 끄기", "delete": "서비스 삭제"}
@@ -109,3 +110,12 @@ def restart_id(node: int | None, unit: str) -> str:
 def parse_restart_id(custom_id: str) -> tuple[int | None, str] | None:
     m = re.fullmatch(rf"rs:(main|\d+):({_UNIT})", custom_id)
     return (None if m[1] == "main" else int(m[1]), m[2]) if m else None
+
+
+def admin_unit_files(directory: str = "/etc/systemd/system") -> set[str]:
+    """Regular *.service files in /etc/systemd/system (symlinks are enable-links, not units made by the admin).
+    A stopped service is unloaded and vanishes from `systemctl list-units`, but its file stays."""
+    try:
+        return {p.name for p in Path(directory).glob("*.service") if p.is_file() and not p.is_symlink() and UNIT_RE.match(p.name)}
+    except OSError:
+        return set()

@@ -156,6 +156,7 @@ class SmBlockGuards(unittest.TestCase):
     def test_queue_processing_validates_each_request(self):
         import json as _json
         import tempfile
+        import uxrules
         m = load_sm_block()
         with tempfile.TemporaryDirectory() as tmp:
             m.QUEUE, m.PUBLIC, m.STATE = f"{tmp}/q", f"{tmp}/public.json", f"{tmp}/blocked.json"
@@ -208,6 +209,7 @@ class NightlySchedule(unittest.TestCase):
 class DeleteUnit(unittest.TestCase):
     def test_only_stopped_units_are_moved_to_trash(self):
         import tempfile
+        import uxrules
         import types
         from node_agent import hostsec
         with tempfile.TemporaryDirectory() as d:
@@ -448,6 +450,7 @@ class PortGuard(unittest.TestCase):
         import shutil
         import subprocess
         import tempfile
+        import uxrules
         from unittest import mock
         m = self.load_smblock()
         tmp = tempfile.mkdtemp(prefix="sm-queue-")
@@ -754,3 +757,16 @@ class UxRules(unittest.TestCase):
         self.assertEqual(uxrules.parse_restart_id(uxrules.restart_id(3, "a.service")), (3, "a.service"))
         for bad in ("rs:main:a b", "rs:x:a.service", "confirm:1.2.3.4", "rs:main:"):
             self.assertIsNone(uxrules.parse_restart_id(bad), bad)
+
+
+class StoppedUnits(unittest.TestCase):
+    def test_admin_unit_files_survive_stop(self):
+        import tempfile
+        import uxrules
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "worldrium.service").write_text("[Service]\n")
+            (Path(d) / "bad name.service").write_text("")
+            (Path(d) / "enabled.service").symlink_to(Path(d) / "worldrium.service")  # enable-link, not admin-made
+            (Path(d) / "note.txt").write_text("")
+            self.assertEqual(uxrules.admin_unit_files(d), {"worldrium.service"})
+        self.assertEqual(uxrules.admin_unit_files("/nonexistent-dir"), set())
