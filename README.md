@@ -160,6 +160,7 @@ bash ~/node_agent/install.sh <중앙_Tailscale_IP>
 ```bash
 scripts/update-agent.sh sub                # 에이전트만 (비밀번호 없음) — 대시보드 "지금 업데이트" 버튼과 같음
 scripts/update-agent.sh --blocker sub      # sm-block 까지 (그 서버 sudo 비밀번호 1회)
+scripts/new-server.sh [--dry-run] [--no-sudo] <ssh-host> "<이름>"   # 새 서버 원클릭: 키 로그인 → 에이전트 → 대시보드 등록 → 역방향 키(from= 제한) → sm-block → 체크리스트
 ```
 토큰·설정은 그대로 유지됩니다.
 

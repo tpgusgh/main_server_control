@@ -7,6 +7,7 @@
   manage.py logout-all          revoke all sessions
   manage.py bans                list permanently banned IPs
   manage.py unban <ip|key>      lift a ban (use when you locked yourself out)
+  manage.py add-node <name> <addr>  register a server (agent token on stdin; used by scripts/new-server.sh)
   manage.py test-alert          send a test message to the configured Telegram/Discord
 """
 import getpass
@@ -106,11 +107,24 @@ def test_alert():
     print("보냈습니다:", ", ".join(alerts.CHANNELS))
 
 
+def add_node(name: str, address: str):
+    import asyncio
+    import nodes
+    from core import db
+    try:
+        info = asyncio.run(nodes.NodeHub(db, lambda *a, **k: None).add(name, address, sys.stdin.readline().strip()))
+    except ValueError as e:
+        sys.exit(f"✗ {e}")
+    print(f"✓ 서버 등록: {name} ({info.get('host')})")
+
+
 COMMANDS = {"test-alert": test_alert, "set-password": set_password, "totp-enable": totp_enable,
             "totp-disable": totp_disable, "logout-all": logout_all, "bans": list_bans}
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "unban":
+    if len(sys.argv) == 4 and sys.argv[1] == "add-node":
+        add_node(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) == 3 and sys.argv[1] == "unban":
         unban(sys.argv[2])
     elif len(sys.argv) == 2 and sys.argv[1] in COMMANDS:
         COMMANDS[sys.argv[1]]()
