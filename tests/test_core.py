@@ -442,6 +442,41 @@ class PortGuard(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.do_svc("stop", "../../etc/passwd")
 
+    def test_slow_service_does_not_crash_the_queue_or_lose_earlier_requests(self):
+        import json
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+        from unittest import mock
+        m = self.load_smblock()
+        tmp = tempfile.mkdtemp(prefix="sm-queue-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        m.QUEUE, m.PUBLIC = os.path.join(tmp, "requests"), os.path.join(tmp, "public.json")
+        os.mkdir(m.QUEUE)
+        applied = []
+        m.apply, m.save, m.ssh_peers, m.guard_stats = (lambda d: applied.append(sorted(d)), lambda d: None, lambda: set(), lambda: {})
+        real = subprocess.run
+
+        def slow_systemctl(cmd, *a, **kw):  # `stop` outlasts the 60 s limit, like a container that is slow to exit
+            if cmd[:2] == ["systemctl", "cat"]:
+                return subprocess.CompletedProcess(cmd, 0, b"", b"")
+            if cmd[0] == "systemctl":
+                raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+            return real(cmd, *a, **kw)
+        for name, req in (("a.json", {"op": "add", "ip": "8.8.8.8", "reason": "x"}),
+                          ("b.json", {"op": "svc", "action": "stop", "unit": "docker.service"}),
+                          ("c.json", {"op": "add", "ip": "1.1.1.1", "reason": "y"})):
+            Path(m.QUEUE, name).write_text(json.dumps(req))
+        with mock.patch.object(subprocess, "run", slow_systemctl):
+            m.process({})
+        self.assertEqual(applied, [["1.1.1.1", "8.8.8.8"]], "both blocks must reach the firewall despite the slow stop")
+        res = json.loads(Path(m.PUBLIC).read_text())["results"]
+        self.assertTrue(res["a"]["ok"] and res["c"]["ok"])
+        self.assertFalse(res["b"]["ok"])
+        self.assertIn("제한 시간", res["b"]["msg"])
+        self.assertEqual(os.listdir(m.QUEUE), [], "every request is answered and removed")
+
 
 class Exposure(unittest.TestCase):
     def test_tailscale_and_lan_binds_are_not_exposed(self):

@@ -22,13 +22,21 @@ reload() { if [ -z "${SM_TEST:-}" ]; then systemctl reload ssh 2>/dev/null || sy
 setting_for() { sshd_ -T -C "user=$USER_NAME,host=test,addr=$2" 2>/dev/null | awk -v k="$1" '$1==k{print $2}'; }
 
 if [ "${1:-}" = "--undo" ]; then
-  rm -f "$DROP"; strip_block
-  sshd_ -t && reload && echo "✓ 원래대로 되돌렸습니다 (비밀번호 로그인 어디서나 가능)"
+  rm -f "$DROP" "$DROP.sm-backup"; strip_block
+  sshd_ -t || { echo "✗ 설정은 되돌렸지만 sshd 설정 검사에 실패했습니다 — sshd 를 다시 시작하기 전에 'sshd -t' 로 원인을 고치세요"; exit 1; }
+  reload
+  echo "✓ 원래대로 되돌렸습니다 (비밀번호 로그인 어디서나 가능)"
   exit 0
 fi
 
 cp -p "$MAIN" "$MAIN.sm-backup"
-rollback() { trap - ERR; rm -f "$DROP"; cp -p "$MAIN.sm-backup" "$MAIN"; echo "✗ $1 — 바꾼 것을 모두 되돌렸습니다 (변화 없음)"; exit 1; }
+if [ -f "$DROP" ]; then cp -p "$DROP" "$DROP.sm-backup"; else rm -f "$DROP.sm-backup"; fi   # a failed re-run must return to the first run's state
+rollback() {
+  trap - ERR
+  if [ -f "$DROP.sm-backup" ]; then cp -p "$DROP.sm-backup" "$DROP"; else rm -f "$DROP"; fi
+  cp -p "$MAIN.sm-backup" "$MAIN"
+  echo "✗ $1 — 바꾼 것을 모두 되돌렸습니다 (변화 없음)"; exit 1
+}
 trap 'rollback "예상치 못한 오류 (스크립트 $LINENO번째 줄)"' ERR
 
 before_pubkey="$(setting_for pubkeyauthentication 8.8.8.8)"

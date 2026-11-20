@@ -74,6 +74,25 @@ class SshPasswordScript(unittest.TestCase):
         self.assertIn("예상치 못한 오류", r.stdout)
         self.assertEqual(self.cfg.read_text(), self.original)
 
+    @unittest.skipIf(os.geteuid() == 0, "root ignores directory permissions")
+    def test_failed_rerun_keeps_the_first_runs_protection(self):
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertEqual(self.setting("passwordauthentication", "8.8.8.8"), "no")
+        self.tmp.chmod(0o555)  # the second run can no longer rewrite sshd_config (sed -i needs a temp file next to it)
+        self.addCleanup(self.tmp.chmod, 0o755)
+        r = self.run_script()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.setting("passwordauthentication", "8.8.8.8"), "no", "protection must survive the failed re-run")
+        self.assertTrue(self.drop.exists())
+
+    def test_undo_reports_a_broken_config(self):
+        self.assertEqual(self.run_script().returncode, 0)
+        self.cfg.write_text(self.cfg.read_text() + "ThisIsNotAKeyword yes\n")
+        r = self.run_script("--undo")
+        self.assertEqual(r.returncode, 1, "a broken config must not look like success")
+        self.assertIn("✗", r.stdout)
+        self.assertNotIn("✓", r.stdout)
+
     def test_refuses_when_key_login_is_off(self):
         self.cfg.write_text(self.original.replace("PubkeyAuthentication yes", "PubkeyAuthentication no"))
         before = self.cfg.read_text()
