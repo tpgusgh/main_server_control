@@ -26,6 +26,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -223,14 +224,68 @@ def do_svc(action: str, unit: str) -> str:
     return f"{unit} {action} 완료"
 
 
-def write_public(d: dict, results: dict, upgrade=None, guard=None):
+SMART_DEV = re.compile(r"^/dev/(nvme\d+n\d+|sd[a-z]+|vd[a-z]+|mmcblk\d+)$")
+SMART_ATA_IDS = {5, 9, 177, 194, 197, 198, 202, 231, 233}
+SMART_NVME_KEYS = ("critical_warning", "temperature", "available_spare", "available_spare_threshold", "percentage_used",
+                   "power_on_hours", "media_errors", "num_err_log_entries", "unsafe_shutdowns")
+
+
+def smart_pick(dev: str, j: dict) -> dict:
+    """Only whitelisted facts leave this root helper (no serial numbers, no raw dump)."""
+    out = {"dev": dev, "model": str(j.get("model_name") or "")[:60],
+           "passed": (j.get("smart_status") or {}).get("passed"),
+           "temp": (j.get("temperature") or {}).get("current"),
+           "hours": (j.get("power_on_time") or {}).get("hours"),
+           "bytes": (j.get("user_capacity") or {}).get("bytes")}
+    nv = j.get("nvme_smart_health_information_log")
+    if isinstance(nv, dict):
+        out["nvme"] = {k: nv.get(k) for k in SMART_NVME_KEYS if isinstance(nv.get(k), (int, float))}
+    table = (j.get("ata_smart_attributes") or {}).get("table")
+    if isinstance(table, list):
+        out["ata"] = {str(a["id"]): {"name": str(a.get("name", ""))[:30], "value": a.get("value"), "raw": (a.get("raw") or {}).get("value")}
+                      for a in table if isinstance(a, dict) and a.get("id") in SMART_ATA_IDS}
+    return out
+
+
+def smart_scan() -> dict:
+    exe = shutil.which("smartctl") or "/usr/sbin/smartctl"
+    if not os.path.exists(exe):
+        return {"installed": False, "ts": int(time.time())}
+    devs = []
+    try:
+        for line in subprocess.run(["lsblk", "-dno", "NAME,TYPE"], capture_output=True, text=True, timeout=10).stdout.splitlines():
+            p = line.split()
+            if len(p) >= 2 and p[1] == "disk" and SMART_DEV.match("/dev/" + p[0]):
+                devs.append("/dev/" + p[0])
+    except (OSError, subprocess.SubprocessError):
+        pass
+    out = []
+    for dev in devs[:8]:
+        try:  # smartctl's exit code is a bit mask even when the JSON is fine, so only the JSON counts
+            r = subprocess.run([exe, "-j", "-a", dev], capture_output=True, text=True, timeout=30)
+            out.append(smart_pick(dev, json.loads(r.stdout or "{}")))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            out.append({"dev": dev, "error": "읽지 못함"})
+    return {"installed": True, "ts": int(time.time()), "devices": out}
+
+
+def old_smart():
+    try:
+        with open(PUBLIC) as f:
+            return json.load(f).get("smart")
+    except (OSError, ValueError):
+        return None
+
+
+def write_public(d: dict, results: dict, upgrade=None, guard=None, smart=None):
     keep = dict(sorted(results.items(), key=lambda kv: -kv[1]["ts"])[:50])
     tmp = PUBLIC + ".tmp"
     with open(tmp, "w") as f:
         json.dump({"blocked": [{"key": k, **v} for k, v in sorted(d.items(), key=lambda kv: -kv[1]["ts"])],
                    "results": keep, "upgrade": upgrade if upgrade is not None else old_upgrade(),
                    "guard": guard or {**(old_guard() or {}), "stats": guard_stats()},
-                   "caps": ["block", "upgrade", "guard", "svc"]}, f)
+                   "smart": smart if smart is not None else old_smart(),
+                   "caps": ["block", "upgrade", "guard", "svc", "smart"]}, f)
     os.chmod(tmp, 0o644)
     os.replace(tmp, PUBLIC)
 
@@ -313,7 +368,7 @@ def run_upgrade(d: dict, results: dict):
 
 def process(d: dict):
     """Handle queued request files (written by the unprivileged user). Each is validated, then deleted."""
-    results, changed, upgrade, guard = old_results(), False, False, None
+    results, changed, upgrade, guard, smart = old_results(), False, False, None, None
     names = sorted(n for n in os.listdir(QUEUE) if n.endswith(".json"))[:50]
     for name in names:
         path, rid = os.path.join(QUEUE, name), name[:-5]
@@ -339,6 +394,8 @@ def process(d: dict):
                 guard, msg = guard_public(), "외부 차단 설정 적용됨"
             elif req.get("op") == "svc":
                 msg = do_svc(str(req.get("action", "")), str(req.get("unit", "")))
+            elif req.get("op") == "smart":
+                smart, msg = smart_scan(), "디스크 점검 완료"
             elif req.get("op") == "stats":
                 guard, msg = guard_public((old_guard() or {}).get("error")), "갱신"
             elif req.get("op") == "upgrade":
@@ -360,7 +417,7 @@ def process(d: dict):
     if changed:
         apply(d)
         save(d)
-    write_public(d, results, guard=guard)
+    write_public(d, results, guard=guard, smart=smart)
     if upgrade:
         run_upgrade(d, results)
 

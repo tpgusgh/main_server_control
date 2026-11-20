@@ -199,14 +199,16 @@ ALERT_TITLES = {"new_ip": "🔔 새 IP 로그인", "login_fail": "⚠️ 로그�
                 "upgrade": "📦 패키지 업그레이드", "ai_case": "🔎 AI 보안 조사 결과",
                 "exposure": "🌍 인터넷에 공개된 주소", "guard": "🧱 외부 차단 설정 변경",
                 "reboot": "🔄 서버 재부팅 완료", "cert_expiry": "🔐 SSL 인증서 만료 임박", "weekly": "🗓️ 주간 리포트",
-                "net_down": "📡 중앙서버 네트워크 끊김", "upload_surge": "📤 업로드 급증"}
+                "net_down": "📡 중앙서버 네트워크 끊김", "upload_surge": "📤 업로드 급증",
+                "kernel_event": "🧯 서버 이상 징후", "disk_warn": "💽 디스크 건강 주의", "disk_crit": "💽 디스크 건강 위험"}
 ALERT_LEVEL = {"ban": "critical", "login_fail": "critical", "node_down": "critical", "needs_you": "critical",
                "new_ip": "warning", "node_hot": "warning", "power": "warning",
                "unban": "good", "node_up": "good", "ai_fix": "good", "site_down": "critical", "site_up": "good",
                "login_risk": "critical", "ai_risk": "warning",
                "config_change": "warning", "disk_forecast": "warning", "monthly": "info", "upgrade": "info", "ai_case": "critical",
                "exposure": "critical", "guard": "warning", "reboot": "good", "cert_expiry": "warning", "weekly": "info",
-               "net_down": "warning", "upload_surge": "warning"}
+               "net_down": "warning", "upload_surge": "warning",
+               "kernel_event": "warning", "disk_warn": "warning", "disk_crit": "critical"}
 
 def unblock_button(key: str) -> list:
     """Discord button under a block alert (discord_bot.py asks for confirmation before acting)."""

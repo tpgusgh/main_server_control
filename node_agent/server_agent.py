@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # hostsec.py ships next to this file
 import hostsec  # noqa: E402
 
-VERSION = "2.5"
+VERSION = "2.6"
 CONFIG_PATH = Path(os.environ.get("AGENT_CONFIG", Path(__file__).resolve().parent / "config.json"))
 UNIT_RE = re.compile(r"^[A-Za-z0-9@._-]+\.service$")
 SAMPLE_INTERVAL = 10
@@ -274,7 +274,12 @@ class Sampler(threading.Thread):
                          "macs": hostsec.macs(), "upgrade": hostsec.upgrade_status(), "guard": hostsec.guard_status()}
 
     def collect_health(self):
-        self.health = {**self.health, "wifi_drops": hostsec.wifi_events()}
+        h = {"wifi_drops": hostsec.wifi_events(), "kernel": hostsec.kernel_events(), "boot": hostsec.boot_info()}
+        hostsec.request_smart()  # root helper reads the disks; we pass on its latest answer
+        h["smart"] = hostsec.smart_status()
+        self.health = h
+        if not h["boot"]:  # boot not finished yet: look again in a minute
+            self._health_t = time.time() - 3540
 
     def run(self):
         while True:

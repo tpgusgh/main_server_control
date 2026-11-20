@@ -606,3 +606,95 @@ class NetworkFeatures(unittest.TestCase):
                 self.assertEqual(hostsec.system_service("stop", "docker.service"), (True, "docker.service stop 완료"))
             with mock.patch.object(hostsec, "_request", lambda *a, **k: (False, "거부")):
                 self.assertEqual(hostsec.system_service("stop", "docker.service"), (False, "거부"))
+
+
+def _load_smblock():
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("smblock_h", str(Path(__file__).resolve().parent.parent / "node_agent" / "sm-block"))
+    m = importlib.util.module_from_spec(importlib.util.spec_from_loader("smblock_h", loader))
+    loader.exec_module(m)
+    return m
+
+
+class HealthFeatures(unittest.TestCase):
+    ANALYZE = ("Startup finished in 4.194s (firmware) + 4.893s (loader) + 1.158s (kernel) + 2.197s (initrd) + "
+               "2min 3.670s (userspace) = 2min 16.114s \ngraphical.target reached after 2min 3.630s in userspace.\n")
+    CHAIN = ("graphical.target @2min 3.630s\n└─multi-user.target @2min 3.630s\n  └─apport.service @2min 3.425s +205ms\n"
+             "    └─foo.service @10.000s +4.500s\n")
+
+    def test_boot_output_from_a_real_server_is_parsed(self):
+        from node_agent import hostsec
+        info = hostsec.parse_boot(self.ANALYZE, self.CHAIN, [("systemd-networkd-wait-online.service", 120.2)])
+        self.assertEqual(info["total_s"], 136.1)
+        self.assertEqual(info["parts"]["kernel"], 1.2)
+        self.assertEqual(info["parts"]["userspace"], 123.7)
+        self.assertEqual(info["failed"], [{"unit": "systemd-networkd-wait-online.service", "secs": 120.2}])
+        self.assertEqual(info["slow"], [("foo.service", 4.5)], "units under 3 s are not slow")
+        self.assertEqual(hostsec.parse_boot("Bootup is not yet finished", "", [])["parts"], {}, "no 'Startup finished' line yet")
+
+    def test_boot_summary_names_the_unit_that_really_delayed_boot(self):
+        import healthrules
+        from node_agent import hostsec
+        info = hostsec.parse_boot(self.ANALYZE, self.CHAIN, [("systemd-networkd-wait-online.service", 120.2)])
+        lines = healthrules.boot_lines(info, ignore=("systemd-networkd-wait-online.service",))
+        self.assertIn("부팅 2분 16초", lines[0])
+        self.assertIn("systemd-networkd-wait-online.service 2분 0초 (실패)", lines[1])
+        self.assertTrue(any("fix-wait-online.sh" in l for l in lines))
+        self.assertEqual(lines[-1], "실패한 서비스 없음 ✅", "an ignored failure is shown as slow but not as a failure")
+        self.assertEqual(healthrules.boot_lines(None), [])
+
+    def test_kernel_log_keeps_only_real_trouble(self):
+        from node_agent import hostsec
+        lines = [
+            "1795180366.361155 hyunho kernel: [UFW BLOCK] IN=wlp2s0 OUT= MAC=c0:e3:50:66:06:ea SRC=192.168.219.102 DST=192.168.219.106 LEN=56",
+            "1795187229.701242 hyunho kernel: kauditd_printk_skb: 9 callbacks suppressed",
+            "1795190000.100000 hyunho kernel: Out of memory: Killed process 4242 (java) total-vm:1234kB",
+            "1795190010.100000 hyunho kernel: blk_update_request: I/O error, dev nvme0n1, sector 123 op 0x0:(READ)",
+            "1795190020.100000 hyunho kernel: mce: [Hardware Error]: Machine check events logged",
+            "1795190030.100000 hyunho kernel: CPU0: Package temperature above threshold, cpu clock throttled (total events = 3)",
+            "1795190040.100000 hyunho systemd-oomd[1]: Killed /user.slice/user-1000.slice/session-3.scope due to memory pressure",
+            "not-a-timestamp hyunho kernel: I/O error"]
+        self.assertEqual([(e["kind"], e["ts"]) for e in hostsec.classify_kernel(lines)],
+                         [("oom", 1795190000), ("disk", 1795190010), ("hardware", 1795190020), ("thermal", 1795190030), ("oom", 1795190040)])
+
+    def test_smart_rules(self):
+        import healthrules
+        nv = lambda **k: {"passed": True, "temp": 40, "nvme": {"critical_warning": 0, "percentage_used": 3, "available_spare": 100,
+                                                              "available_spare_threshold": 10, "media_errors": 0, **k}}
+        ata = lambda attrs, **k: {"passed": True, "temp": 35, "ata": {i: {"value": v, "raw": r} for i, (v, r) in attrs.items()}, **k}
+        a = healthrules.smart_assess(nv())
+        self.assertEqual((a["level"], a["wear"], a["notes"]), ("ok", 3, []))
+        self.assertEqual(healthrules.smart_assess(nv(percentage_used=85))["level"], "warn")
+        self.assertEqual(healthrules.smart_assess(nv(percentage_used=95))["level"], "crit")
+        self.assertEqual(healthrules.smart_assess(nv(available_spare=5))["level"], "crit")
+        self.assertEqual(healthrules.smart_assess(nv(media_errors=2))["level"], "warn")
+        self.assertEqual(healthrules.smart_assess(nv(critical_warning=4))["level"], "crit")
+        self.assertEqual(healthrules.smart_assess({**nv(), "passed": False})["level"], "crit")
+        self.assertEqual(healthrules.smart_assess(ata({"5": (100, 8)}))["level"], "warn")
+        self.assertEqual(healthrules.smart_assess(ata({"5": (100, 60)}))["level"], "crit")
+        self.assertEqual(healthrules.smart_assess(ata({"197": (100, 1)}))["level"], "warn")
+        w = healthrules.smart_assess(ata({"231": (15, 0)}))
+        self.assertEqual((w["level"], w["wear"]), ("warn", 85))
+        self.assertEqual(healthrules.smart_assess(ata({"231": (8, 0)}))["level"], "crit")
+        self.assertEqual(healthrules.smart_assess({"passed": True, "temp": 70})["level"], "warn")
+        self.assertEqual(healthrules.smart_assess({"passed": True, "temp": 80})["level"], "crit")
+        self.assertEqual(healthrules.smart_assess({"dev": "/dev/sda", "error": "읽지 못함"})["level"], "warn")
+
+    def test_root_helper_passes_on_only_whitelisted_smart_facts(self):
+        import json
+        m = _load_smblock()
+        raw = {"model_name": "Test SSD", "serial_number": "SECRET-123", "smart_status": {"passed": True},
+               "temperature": {"current": 41}, "power_on_time": {"hours": 1234}, "user_capacity": {"bytes": 512_000_000_000},
+               "nvme_smart_health_information_log": {"percentage_used": 4, "temperature": 41, "available_spare": 100,
+                                                     "host_reads": 99999, "critical_warning": 0},
+               "ata_smart_attributes": {"table": [{"id": 5, "name": "Reallocated_Sector_Ct", "value": 100, "raw": {"value": 0}},
+                                                  {"id": 12, "name": "Power_Cycle_Count", "value": 99, "raw": {"value": 7}}]}}
+        out = m.smart_pick("/dev/nvme0n1", raw)
+        self.assertEqual(out["nvme"], {"percentage_used": 4, "temperature": 41, "available_spare": 100, "critical_warning": 0})
+        self.assertEqual(list(out["ata"]), ["5"], "only the attributes we judge")
+        self.assertNotIn("SECRET-123", json.dumps(out))
+        for ok in ("/dev/nvme0n1", "/dev/sda", "/dev/mmcblk0", "/dev/vdb"):
+            self.assertTrue(m.SMART_DEV.match(ok), ok)
+        for bad in ("/dev/sda1", "/dev/../etc/passwd", "sda", "/dev/nvme0n1; reboot", "/dev/loop0"):
+            self.assertFalse(m.SMART_DEV.match(bad), bad)

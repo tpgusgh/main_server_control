@@ -12,9 +12,10 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
+import healthrules
 import monitor
 import netwatch
-from agent import TZ
+from agent import IGNORE_FAILED, TZ
 from core import ALERT_TITLES, confirm_password, db, local_name, raise_alert, require_auth
 from node_agent import hostsec
 from routes_nodes import hub
@@ -35,6 +36,8 @@ db("CREATE TABLE IF NOT EXISTS integrity(server TEXT PRIMARY KEY, ts INTEGER, sn
 db("""CREATE TABLE IF NOT EXISTS integrity_changes(
       id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, server TEXT, name TEXT, changes TEXT)""")
 db("CREATE TABLE IF NOT EXISTS fleet_kv(k TEXT PRIMARY KEY, v TEXT)")
+db("CREATE TABLE IF NOT EXISTS kernel_events(server TEXT, ts INTEGER, kind TEXT, line TEXT)")
+db("CREATE INDEX IF NOT EXISTS idx_kernel ON kernel_events(server, ts)")
 db("CREATE TABLE IF NOT EXISTS power_daily(day TEXT, server TEXT, wh REAL DEFAULT 0, minutes INTEGER DEFAULT 0, "
    "PRIMARY KEY(day, server))")
 db("""CREATE TABLE IF NOT EXISTS power_jobs(
@@ -107,6 +110,75 @@ class Ledger:
             self.prev[key] = online
 
 
+PENDING_BOOTS: dict[str, tuple[str, float, float]] = {}  # server -> (name, boot time, first seen)
+MAIN_HEALTH: dict = {}  # this server's boot / kernel / SMART facts, refreshed hourly
+KIND_KR = {"oom": "메모리가 모자라 프로세스가 강제 종료됐어요", "disk": "디스크 입출력 오류가 났어요",
+           "hardware": "하드웨어 오류가 보고됐어요", "thermal": "과열로 CPU 속도가 제한됐어요"}
+
+
+def health_for(key: str) -> dict:
+    if key == MAIN:
+        return MAIN_HEALTH
+    return (((hub.state.get(int(key.split(":")[1])) or {}).get("data") or {}).get("health")) or {}
+
+
+def boot_info_for(key: str):
+    return hostsec.boot_info() if key == MAIN else health_for(key).get("boot")
+
+
+def refresh_main_health():
+    hostsec.request_smart()  # root helper reads the disks (waits up to 25 s)
+    MAIN_HEALTH.update(kernel=hostsec.kernel_events(), smart=hostsec.smart_status(), boot=hostsec.boot_info())
+
+
+def _kernel_alerts(key: str, name: str, events: list):
+    new = []
+    for e in events:
+        if not db("SELECT 1 FROM kernel_events WHERE server=? AND ts=? AND line=?", (key, e["ts"], e["line"]), one=True):
+            db("INSERT INTO kernel_events(server, ts, kind, line) VALUES(?,?,?,?)", (key, e["ts"], e["kind"], e["line"]))
+            new.append(e)
+    now = int(time.time())
+    for kind in dict.fromkeys(e["kind"] for e in new):
+        if now - int(_kv(f"kern:{key}:{kind}") or 0) < 1800:
+            continue
+        _kv(f"kern:{key}:{kind}", now)
+        ev = [e for e in new if e["kind"] == kind]
+        raise_alert("kernel_event", "", "", f"서버 '{name}' {KIND_KR[kind]} — 최근 {len(ev)}건\n" + "\n".join(e["line"][:120] for e in ev[-3:]))
+
+
+def _smart_alerts(key: str, name: str, smart):
+    for d in (smart or {}).get("devices") or []:
+        a = healthrules.smart_assess(d)
+        state_key, prev = f"smart:{key}:{d['dev']}", _kv(f"smart:{key}:{d['dev']}") or "ok"
+        if healthrules.RANK[a["level"]] > healthrules.RANK[prev]:
+            raise_alert("disk_crit" if a["level"] == "crit" else "disk_warn", "", "",
+                        f"서버 '{name}' 디스크 {d['dev']} {d.get('model') or ''} — {'위험' if a['level'] == 'crit' else '주의'}\n" + "\n".join(a["notes"]))
+        _kv(state_key, a["level"])
+
+
+def process_health():
+    for key, name in server_names().items():
+        h = health_for(key)
+        _kernel_alerts(key, name, (h.get("kernel") or {}).get("events") or [])
+        _smart_alerts(key, name, h.get("smart"))
+
+
+@router.get("/api/health")
+def health(request: Request):
+    require_auth(request)
+    names, rows = server_names(), []
+    for key, name in names.items():
+        h = health_for(key)
+        sm, boot = h.get("smart"), h.get("boot")
+        rows.append({"server": key, "name": name,
+                     "smart": None if sm is None else {"installed": sm.get("installed", False), "ts": sm.get("ts"),
+                                                       "devices": [{**d, **healthrules.smart_assess(d)} for d in sm.get("devices") or []]},
+                     "boot": None if not boot else {"time": boot.get("boot_time"), "lines": healthrules.boot_lines(boot, IGNORE_FAILED)}})
+    kern = [{**dict(r), "name": names.get(r["server"], r["server"])} for r in
+            db("SELECT server, ts, kind, line FROM kernel_events ORDER BY ts DESC LIMIT 20")]
+    return {"rows": rows, "kernel": kern, "kinds": KIND_KR}
+
+
 def check_boots():
     """Boot time moved → the server rebooted (also catches reboots too quick to look 'offline')."""
     cur = {MAIN: (local_name(), psutil.boot_time())}
@@ -120,8 +192,15 @@ def check_boots():
             continue
         _kv(f"boot:{key}", boot)
         if prev is not None:
+            PENDING_BOOTS[key] = (name, boot, time.time())  # announce once systemd says boot is finished (the summary needs it)
+    for key, (name, boot, seen) in list(PENDING_BOOTS.items()):
+        info = boot_info_for(key)
+        ready = bool(info and info.get("total_s") and abs((info.get("boot_time") or 0) - boot) < 180)
+        if ready or time.time() - seen > 300:  # after 5 minutes announce without the summary
+            lines = healthrules.boot_lines(info, IGNORE_FAILED) if ready else []
             raise_alert("reboot", "", "", f"서버 '{name}' 재부팅 완료 · {datetime.fromtimestamp(boot, TZ):%m-%d %H:%M} 부팅, "
-                                          "다시 정상 연결됨")
+                                          "다시 정상 연결됨" + "".join("\n" + l for l in lines))
+            PENDING_BOOTS.pop(key)
 
 
 def uptime(month: str) -> list[dict]:
@@ -464,6 +543,9 @@ async def loop():
                 await asyncio.to_thread(record_disk)
                 await asyncio.to_thread(integrity_all)
                 await asyncio.to_thread(remember_macs)
+                await asyncio.to_thread(refresh_main_health)
+                await asyncio.to_thread(process_health)
+                await asyncio.to_thread(lambda: db("DELETE FROM kernel_events WHERE ts < ?", (int(time.time()) - 30 * 86400,)))
                 await asyncio.to_thread(lambda: _kv("wifi_drops_main", json.dumps(hostsec.wifi_events())))
                 await check_tunnels()
                 for f in await asyncio.to_thread(forecasts):
