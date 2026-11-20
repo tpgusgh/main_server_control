@@ -530,6 +530,8 @@ async function loadSecurity() {
   api("/api/hostblock").then((r) => renderHostBlocks("l", r.installed ? r.blocked : null, null)).catch(() => {});
   loadIntegrity().catch(() => {});
   loadDevices().catch(() => {});
+  loadQuiet().catch(() => {});
+  loadHistory().catch(() => {});
   loadGuard().catch(() => {});
   loadAiActions().catch(() => {});
   const [{ sessions }, me, { bans }, alertRows] = await Promise.all([api("/api/sessions"), api("/api/me"), api("/api/bans"), loadAlertBadge()]);
@@ -1282,6 +1284,27 @@ async function loadGuard() {
 $("guardRefresh").addEventListener("click", async () => {
   try { await post("/api/guard/refresh", { node: null }); toast("다시 확인했습니다."); loadGuard(); } catch (err) { toast(err.message, true); }
 });
+
+async function loadQuiet() {
+  const q = await api("/api/quiet");
+  $("quietOn").checked = !!q.enabled; $("quietStart").value = q.start; $("quietEnd").value = q.end;
+  $("quietHeld").textContent = q.held ? `지금 보류 중인 알림 ${q.held}건` : "";
+}
+$("quietForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try { await post("/api/quiet", { enabled: $("quietOn").checked, start: $("quietStart").value, end: $("quietEnd").value }); toast("저장했습니다."); loadQuiet(); }
+  catch (err) { toast(err.message, true); }
+});
+
+const HIST_CLS = { 관리자: "", AI: "good", 시스템: "warn" };
+async function loadHistory() {
+  const { rows } = await api(`/api/history?${new URLSearchParams({ kind: $("histKind").value, q: $("histQ").value.trim() })}`);
+  fill($("histRows"), rows.map((r) => h("tr", {}, h("td", { class: "num" }, fmtDateTime(r.ts)), h("td", {}, r.who),
+    h("td", {}, h("span", { class: `pill ${HIST_CLS[r.kind] || ""}` }, r.kind)), h("td", { title: r.raw || "" }, r.text))), 4, "기록이 없습니다");
+}
+$("histKind").addEventListener("change", () => loadHistory().catch(() => {}));
+let histTimer;
+$("histQ").addEventListener("input", () => { clearTimeout(histTimer); histTimer = setTimeout(() => loadHistory().catch(() => {}), 300); });
 
 async function loadDevices() {
   const { devices } = await api("/api/devices");

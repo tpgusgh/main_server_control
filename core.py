@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import uxrules
 import ipaddress
 import os
 import re
@@ -73,6 +74,8 @@ CREATE TABLE IF NOT EXISTS alerts(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, kind TEXT, ip TEXT, country TEXT, message TEXT);
 CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts);
 """)
+if "held" not in {r[1] for r in _db.execute("PRAGMA table_info(alerts)")}:  # alerts held back during quiet hours
+    _db.execute("ALTER TABLE alerts ADD COLUMN held INTEGER DEFAULT 0")
 for _table in ("access_log", "sessions"):
     if "email" not in {r[1] for r in _db.execute(f"PRAGMA table_info({_table})")}:
         _db.execute(f"ALTER TABLE {_table} ADD COLUMN email TEXT")
@@ -239,18 +242,41 @@ def discord_body(kind: str, message: str) -> tuple[str, str]:
     return title, body
 
 
+_quiet_cache: tuple[float, dict | None] = (0.0, None)
+
+
+def quiet_config() -> dict | None:
+    """{"enabled", "start", "end"} (KST) or None; cached for 30 s because every alert asks."""
+    global _quiet_cache
+    if time.time() - _quiet_cache[0] > 30:
+        _quiet_cache = (time.time(), security.load_config().get("quiet"))
+    return _quiet_cache[1]
+
+
+def set_quiet_config(cfg: dict):
+    global _quiet_cache
+    with _cfg_lock:
+        full = security.load_config()
+        full["quiet"] = cfg
+        security.save_config(full)
+    _quiet_cache = (0.0, None)
+
+
 def raise_alert(kind: str, ip: str, country: str, message: str, throttle: int = 0, push: bool = True,
                 components: list | None = None):
-    """Store an alert for the dashboard and push it to Telegram/Discord (if configured)."""
+    """Store an alert for the dashboard and push it to Telegram/Discord (if configured). During quiet hours only
+    critical alerts are pushed; the rest are kept (held=1) and sent as one digest when the quiet time ends."""
     now = time.time()
     if throttle:
         last = db("SELECT MAX(ts) t FROM alerts WHERE kind=? AND ip=?", (kind, ip), one=True)["t"] or 0
         if now - last < throttle:
             return
-    db("INSERT INTO alerts(ts,kind,ip,country,message) VALUES(?,?,?,?,?)", (int(now), kind, ip, country, message[:300]))
+    level = ALERT_LEVEL.get(kind, "info")
+    held = bool(push and uxrules.should_hold(level, quiet_config(), datetime.fromtimestamp(now, ALERT_TZ).strftime("%H:%M")))
+    db("INSERT INTO alerts(ts,kind,ip,country,message,held) VALUES(?,?,?,?,?,?)",
+       (int(now), kind, ip, country, message[:300], int(held)))
     label = f" ({IP_LABELS[ip]})" if ip in IP_LABELS else ""
-    if push:
-        level = ALERT_LEVEL.get(kind, "info")
+    if push and not held:
         title, body = discord_body(kind, message)
         is_ip = bool(ip) and not ip.startswith("http")  # node alerts carry the agent URL, not a client IP
         flag = "".join(chr(0x1F1E6 + ord(c) - 65) for c in country) if len(country) == 2 and country.isalpha() else ""
