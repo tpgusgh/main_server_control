@@ -212,9 +212,12 @@ def do_svc(action: str, unit: str) -> str:
         raise ValueError("잘못된 요청")
     if SVC_DENY.match(unit):
         raise ValueError(f"{unit} 은(는) 접속·시스템 유지에 필요해서 원격으로 바꿀 수 없습니다")
-    if subprocess.run(["systemctl", "cat", unit], capture_output=True).returncode != 0:
-        raise ValueError(f"{unit} 이(가) 없습니다")
-    r = subprocess.run(["systemctl", action, unit], capture_output=True, text=True, timeout=60)
+    try:  # a slow stop/restart must become an answer, not a crash that drops the rest of the queue
+        if subprocess.run(["systemctl", "cat", unit], capture_output=True, timeout=15).returncode != 0:
+            raise ValueError(f"{unit} 이(가) 없습니다")
+        r = subprocess.run(["systemctl", action, unit], capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"{unit} {action} 이(가) 제한 시간 안에 끝나지 않았습니다 (계속 진행 중일 수 있으니 서비스 상태를 확인하세요)")
     if r.returncode:
         raise ValueError(f"systemctl {action} {unit} 실패: {(r.stderr or r.stdout).strip()[:150]}")
     return f"{unit} {action} 완료"
@@ -347,7 +350,7 @@ def process(d: dict):
                 raise ValueError("알 수 없는 요청")
             results[rid] = {"ok": True, "msg": msg, "ts": int(time.time())}
             changed = True
-        except (ValueError, OSError) as e:
+        except (ValueError, OSError, subprocess.SubprocessError) as e:  # one bad request never stops the others
             results[rid] = {"ok": False, "msg": str(e)[:200], "ts": int(time.time())}
         finally:
             try:
