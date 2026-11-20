@@ -530,4 +530,47 @@ def system_service(action: str, unit: str):
     """Ask root sm-block to start/stop/restart/enable/disable an existing system service (it re-checks the deny list)."""
     if "svc" not in caps():
         return False, "시스템 서비스 제어 도구가 없습니다 — 그 서버에서 install-blocker.sh 를 다시 실행하세요"
-    return _request({"op": "svc", "action": action, "unit": unit}, wait=30.0)
+    ok, msg = _request({"op": "svc", "action": action, "unit": unit}, wait=80.0)  # sm-block allows a job 15 s + 60 s
+    if ok and msg.startswith("요청함"):  # no answer yet: the job is still running
+        return True, f"{unit} {action} 이(가) 80초 안에 끝나지 않았습니다 — 계속 진행 중일 수 있으니 잠시 뒤 서비스 목록에서 확인하세요"
+    return ok, msg
+
+
+# ---------------------------------------------------------------- network quality
+
+def parse_wireless(text: str) -> dict | None:
+    """/proc/net/wireless → {"iface", "dbm"} of the first interface; None when there is no Wi-Fi."""
+    for line in text.splitlines()[2:]:
+        parts = line.replace(":", " ", 1).split()
+        if len(parts) >= 5:
+            try:
+                return {"iface": parts[0], "dbm": int(float(parts[3]))}
+            except ValueError:
+                continue
+    return None
+
+
+def wifi() -> dict | None:
+    return parse_wireless(_read("/proc/net/wireless"))
+
+
+def wifi_events(hours: int = 24) -> dict:
+    """Wi-Fi drops from wpa_supplicant's journal: lost beacons (the router went silent) and disconnects that were
+    not our own (a reboot disconnects on purpose, locally_generated=1)."""
+    out = _run(["journalctl", "-t", "wpa_supplicant", "--since", f"-{hours}h", "--no-pager", "-o", "cat"], timeout=15)
+    return {"beacon_loss": out.count("CTRL-EVENT-BEACON-LOSS"),
+            "disconnects": sum(1 for l in out.splitlines() if "CTRL-EVENT-DISCONNECTED" in l and "locally_generated=1" not in l)}
+
+
+def internet_ok(timeout: float = 2.0) -> tuple[bool, float | None]:
+    """Can this machine open a TCP connection to the internet? (ok, milliseconds)"""
+    import socket
+    import time
+    for host in ("1.1.1.1", "8.8.8.8", "9.9.9.9"):
+        t0 = time.monotonic()
+        try:
+            with socket.create_connection((host, 443), timeout=timeout):
+                return True, round((time.monotonic() - t0) * 1000, 1)
+        except OSError:
+            continue
+    return False, None

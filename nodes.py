@@ -44,16 +44,24 @@ def parse_address(raw: str) -> str:
     return f"http://{hostpart}:{int(port)}"
 
 
+def central_online() -> bool:
+    """Is THIS server's own internet up? (a function of its own so tests can replace it)"""
+    return hostsec.internet_ok()[0]
+
+
 class NodeHub:
     def __init__(self, db, raise_alert):
         self.db, self.raise_alert = db, raise_alert
         self.state: dict[int, dict] = {}
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(6, connect=3))
+        self._central: tuple[float, bool] = (0.0, True)  # (checked at, internet ok) — cached for a few seconds
         db("""CREATE TABLE IF NOT EXISTS nodes(
               id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, address TEXT, token TEXT, created INTEGER)""")
         db("""CREATE TABLE IF NOT EXISTS node_metrics(
               node_id INTEGER, ts INTEGER, cpu REAL, mem REAL, temp REAL, load1 REAL, disk REAL,
               net_rx REAL, net_tx REAL, PRIMARY KEY(node_id, ts))""")
+        db("CREATE TABLE IF NOT EXISTS net_quality(ts INTEGER, server TEXT, rtt_ms REAL, ok INTEGER, dbm INTEGER)")
+        db("CREATE INDEX IF NOT EXISTS idx_netq ON net_quality(server, ts)")
         if "memo" not in {r[1] for r in db("PRAGMA table_info(nodes)")}:
             db("ALTER TABLE nodes ADD COLUMN memo TEXT DEFAULT ''")
 
@@ -64,7 +72,7 @@ class NodeHub:
         st = self.state.get(n["id"], {})
         return {"id": n["id"], "name": n["name"], "memo": n.get("memo") or "", "address": n["address"].removeprefix("http://"),
                 "created": n["created"], "online": st.get("online"), "last_ok": st.get("last_ok"),
-                "error": st.get("error"), "data": st.get("data")}
+                "error": st.get("error"), "unknown": bool(st.get("unknown")), "data": st.get("data")}
 
     async def fetch(self, node: dict) -> dict:
         r = await self.client.get(f"{node['address']}/v1/status", headers={"Authorization": f"Bearer {node['token']}"})
@@ -73,23 +81,43 @@ class NodeHub:
         r.raise_for_status()
         return r.json()
 
+    def _quality(self, key: str, rtt: float | None, ok: int, dbm: int | None):
+        self.db("INSERT INTO net_quality(ts,server,rtt_ms,ok,dbm) VALUES(?,?,?,?,?)", (int(time.time()), key, rtt, ok, dbm))
+
+    async def central_ok(self) -> bool:
+        ts, ok = self._central
+        if time.time() - ts < 8:
+            return ok
+        ok = await asyncio.to_thread(central_online)
+        self._central = (time.time(), ok)
+        return ok
+
     async def poll(self, node: dict):
         st = self.state.setdefault(node["id"], {"online": None, "fails": 0})
+        key, t0 = f"node:{node['id']}", time.monotonic()
         try:
             data = await self.fetch(node)
         except Exception as e:
+            await asyncio.to_thread(self._quality, key, None, 0, None)
             st["fails"] += 1
             st["error"] = str(e) if isinstance(e, PermissionError) else f"연결 실패 ({type(e).__name__})"
             if st["fails"] >= OFFLINE_AFTER and st["online"] is not False:
+                if not await self.central_ok():
+                    # our own internet is down, so nothing can be said about this server: don't call it down
+                    st["unknown"] = True
+                    return
+                st["unknown"] = False
                 if st["online"] is True:
                     await asyncio.to_thread(self.raise_alert, "node_down", node["address"], "",
                                             f"서버 '{node['name']}' 응답 없음 · {st['error']}")
                 st["online"] = False
             return
+        await asyncio.to_thread(self._quality, key, round((time.monotonic() - t0) * 1000, 1), 1,
+                                (((data.get("now") or {}).get("wifi")) or {}).get("dbm"))
         for p in (data.get("now") or {}).get("ports", []):  # judge exposure here too (older agents only checked loopback)
             p["public"] = hostsec.exposed(p.get("ip", ""))
         was_down = st["online"] is False
-        st.update(online=True, fails=0, error=None, last_ok=int(time.time()), data=data)
+        st.update(online=True, fails=0, error=None, unknown=False, last_ok=int(time.time()), data=data)
         if was_down:
             await asyncio.to_thread(self.raise_alert, "node_up", node["address"], "", f"서버 '{node['name']}' 다시 연결됨")
         n = data.get("now") or {}
@@ -109,6 +137,7 @@ class NodeHub:
             await asyncio.gather(*(self.poll(n) for n in nodes), return_exceptions=True)
             if time.time() - last_prune > 3600:
                 await asyncio.to_thread(self.db, "DELETE FROM node_metrics WHERE ts < ?", (int(time.time()) - METRIC_KEEP,))
+                await asyncio.to_thread(self.db, "DELETE FROM net_quality WHERE ts < ?", (int(time.time()) - METRIC_KEEP,))
                 last_prune = time.time()
             await asyncio.sleep(POLL_INTERVAL)
 
@@ -159,15 +188,16 @@ class NodeHub:
     async def action(self, node: dict, unit: str, action: str) -> tuple[int, dict]:
         if not UNIT_RE.match(unit) or action not in ("start", "stop", "restart", "enable", "disable", "delete"):
             return 400, {"detail": "bad request"}
-        return await self._post(node, f"/v1/services/{unit}/{action}")
+        return await self._post(node, f"/v1/services/{unit}/{action}", timeout=90)  # a system service can take ~80 s
 
     async def terminate(self, node: dict, pid: int) -> tuple[int, dict]:
         return await self._post(node, f"/v1/process/{int(pid)}/terminate")
 
-    async def _post(self, node: dict, path: str, payload: dict | None = None) -> tuple[int, dict]:
+    async def _post(self, node: dict, path: str, payload: dict | None = None, timeout: float | None = None) -> tuple[int, dict]:
         try:
             r = await self.client.post(f"{node['address']}{path}", json=payload,
-                                       headers={"Authorization": f"Bearer {node['token']}"})
+                                       headers={"Authorization": f"Bearer {node['token']}"},
+                                       timeout=timeout or httpx.USE_CLIENT_DEFAULT)
         except httpx.HTTPError as e:
             return 502, {"detail": f"서버에 연결할 수 없습니다 ({type(e).__name__})"}
         try:

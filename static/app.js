@@ -368,8 +368,8 @@ async function serviceAction(unit, action) {
   const ok = await confirmDialog(`${unit} ${label}`, text, action === "stop" || action === "disable" || action === "delete");
   if (!ok) return;
   try {
-    await post(`/api/services/${encodeURIComponent(unit)}/${action}`);
-    toast(`${unit} ${label} 요청을 보냈습니다.`);
+    const r = await post(`/api/services/${encodeURIComponent(unit)}/${action}`);
+    toast((r && r.detail) || `${unit} ${label} 요청을 보냈습니다.`);
     setTimeout(() => loadServices().catch(() => {}), 1500);
   } catch (err) { toast(err.message, true); }
 }
@@ -461,7 +461,7 @@ const ALERT_KIND = { new_ip: ["새 IP 로그인", "warn"], login_fail: ["로그�
   power: ["전원 조작", "warn"], site_down: ["사이트 다운", "crit"], site_up: ["사이트 복구", "good"],
   login_risk: ["수상한 로그인", "crit"], ai_risk: ["AI 위험 감지", "warn"],
   config_change: ["설정 변경", "warn"], disk_forecast: ["디스크 예측", "warn"], monthly: ["월간 가동률", ""],
-  upgrade: ["업그레이드", ""], ai_case: ["AI 조사", "crit"], cert_expiry: ["인증서 만료", "warn"], weekly: ["주간 리포트", ""], exposure: ["인터넷 공개", "crit"], guard: ["외부 차단 설정", "warn"],
+  upgrade: ["업그레이드", ""], ai_case: ["AI 조사", "crit"], cert_expiry: ["인증서 만료", "warn"], weekly: ["주간 리포트", ""], net_down: ["중앙서버 네트워크", "warn"], upload_surge: ["업로드 급증", "warn"], exposure: ["인터넷 공개", "crit"], guard: ["외부 차단 설정", "warn"],
   reboot: ["재부팅 완료", "good"] };
 
 async function unbanIp(b) {
@@ -1349,6 +1349,19 @@ $("jobForm").addEventListener("submit", async (e) => {
   } catch (err) { toast(err.message, true); }
 });
 
+async function loadNetQuality() {
+  const { rows } = await api("/api/netquality");
+  fill($("netRows"), rows.map((r) => {
+    const sig = r.dbm == null ? h("span", { class: "muted" }, "유선/없음")
+      : h("span", { class: `pill ${r.dbm <= -75 ? "crit" : r.dbm <= -67 ? "warn" : "good"}` }, `${r.dbm} dBm`);
+    const loss = r.loss_pct == null ? "–" : h("span", { class: r.loss_pct >= 5 ? "pill crit" : r.loss_pct >= 1 ? "pill warn" : "" }, `${r.loss_pct}%`);
+    return h("tr", {}, h("td", {}, h("b", {}, r.name), r.kind === "main" ? h("span", { class: "muted" }, " (인터넷)") : null),
+      h("td", { class: "r num" }, r.avg_ms == null ? "–" : `${r.avg_ms} / ${r.max_ms} ms`), h("td", { class: "r num" }, loss),
+      h("td", { class: "r num" }, sig),
+      h("td", { class: "r num" }, r.drops ? `${r.drops.beacon_loss ?? 0}회 (연결 해제 ${r.drops.disconnects ?? 0})` : "–"));
+  }), 5, "아직 기록이 없습니다");
+}
+
 async function loadIntegrity() {
   const f = await api("/api/fleet");
   const base = Object.keys(f.baselines).length;
@@ -1396,7 +1409,8 @@ function serverCard(n, isLocal) {
   const d = isLocal ? n : n.data;
   const now = isLocal ? n.now : d && d.now;
   const online = isLocal ? true : n.online;
-  const status = online ? h("span", { class: "pill good" }, "온라인") : online === false ? h("span", { class: "pill crit" }, "연결 끊김") : h("span", { class: "pill" }, "확인 중");
+  const status = n.unknown ? h("span", { class: "pill warn", title: "중앙서버 인터넷이 끊겨서 이 서버의 상태를 확인할 수 없어요" }, "확인 불가")
+    : online ? h("span", { class: "pill good" }, "온라인") : online === false ? h("span", { class: "pill crit" }, "연결 끊김") : h("span", { class: "pill" }, "확인 중");
   return h("button", { class: "card server-card" + (online === false ? " offline" : ""), onclick: () => { if (isLocal) { closeNode(); selectTab("overview"); } else openNode(n.id); } },
     h("div", { class: "sc-head" }, h("b", {}, n.name), status, isLocal ? h("span", { class: "pill me" }, "이 서버") : null),
     h("div", { class: "muted mono" }, isLocal ? `${n.host} · ${DASHBOARD_TS_IP}` : `${(d && d.host) || "?"} · ${n.address}`),
@@ -1414,7 +1428,7 @@ async function loadServers() {
     DASHBOARD_TS_IP = d.local.ts_ip;
     $("installCmd").textContent = `bash ~/node_agent/install.sh ${DASHBOARD_TS_IP}`;
   }
-  if (currentNode == null && !$("serverListView").classList.contains("hidden")) loadFleet(d).catch(() => {});
+  if (currentNode == null && !$("serverListView").classList.contains("hidden")) { loadFleet(d).catch(() => {}); loadNetQuality().catch(() => {}); }
   const local = h("div", { class: "local-wrap" }, serverCard(d.local, true),
     h("button", { class: "link-btn", onclick: (e) => { e.stopPropagation(); editServer(d.local, true); } }, "정보 수정"));
   $("serverCards").replaceChildren(local, ...d.nodes.map((n) => serverCard(n, false)));
