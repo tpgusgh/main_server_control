@@ -999,12 +999,15 @@ async function askAi(question) {
   }
 }
 
+const ACTION_KR = { start: "서비스 켜기", stop: "서비스 끄기", restart: "서비스 다시 켜기", enable: "부팅 시 자동 실행 켜기",
+  disable: "부팅 시 자동 실행 끄기", terminate: "프로세스 종료 (PID)" };
 /** Buttons for what the AI proposed. Nothing runs without a click + confirm, and the server re-checks on click. */
 function chatActions(list) {
   return h("div", { class: "chat-actions" }, list.map((a) => {
     const risky = ["stop", "disable", "terminate"].includes(a.action);
     const b = h("button", { class: `btn ${risky ? "danger" : "primary"}`, type: "button", onclick: async () => {
-      if (!(await confirmDialog(a.label, `${a.reason ? `${a.reason}\n\n` : ""}AI가 제안한 조치입니다. 실행할까요?`, risky))) return;
+      // the AI wrote label/reason; the line below is what will really run (target comes from the server-validated proposal)
+      if (!(await confirmDialog(a.label, `실제 실행: ${ACTION_KR[a.action] || a.action} → ${a.target}${a.node != null ? " (원격 서버)" : ""}\n\n${a.reason ? `AI의 이유: ${a.reason}\n\n` : ""}AI가 제안한 조치입니다. 실행할까요?`, risky))) return;
       b.disabled = true; b.textContent = "실행 중…";
       try {
         const base = a.node != null ? `/api/nodes/${a.node}` : "/api";
