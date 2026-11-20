@@ -424,6 +424,24 @@ class PortGuard(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.clean_guard({"allow_tcp": list(range(200))}, dict(m.GUARD_DEFAULT))
 
+    def test_service_control_never_touches_access_or_network_units(self):
+        m = self.load_smblock()
+        denied = ["ssh.service", "sshd.service", "ssh@x.service", "systemd-logind.service", "dbus-broker.service",
+                  "tailscaled.service", "cloudflared.service", "getty@tty1.service", "sm-block-queue.service",
+                  "wpa_supplicant.service", "wpa_supplicant@wlp2s0.service", "networking.service", "network-manager.service",
+                  "NetworkManager.service", "ifup@wlp2s0.service", "netplan-wpa-wlp2s0.service", "cron.service",
+                  "unattended-upgrades.service"]
+        for u in denied:
+            self.assertTrue(m.SVC_DENY.match(u), f"{u} must be refused")
+        for u in ["worldrium.service", "worldrium-auth.service", "nginx.service", "docker.service", "postgresql@16-main.service",
+                  "mosquitto.service", "frigate.service"]:
+            self.assertFalse(m.SVC_DENY.match(u), f"{u} must stay controllable")
+        for bad in ("rm", "start; reboot", ""):
+            with self.assertRaises(ValueError):
+                m.do_svc(bad, "worldrium.service")
+        with self.assertRaises(ValueError):
+            m.do_svc("stop", "../../etc/passwd")
+
 
 class Exposure(unittest.TestCase):
     def test_tailscale_and_lan_binds_are_not_exposed(self):

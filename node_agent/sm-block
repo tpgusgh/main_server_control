@@ -198,10 +198,12 @@ def old_guard():
 # System-service control (start/stop/restart/enable/disable an EXISTING unit). Units whose loss would cut you off
 # or break the machine are refused outright; nothing here can create or edit unit files.
 SVC_RE = re.compile(r"^[A-Za-z0-9@._-]{1,100}\.service$")
-SVC_DENY = re.compile(r"^(ssh|sshd|systemd-[a-z0-9-]+|dbus(-broker)?|tailscaled|cloudflared|polkit|NetworkManager|"
-                      r"networkd-dispatcher|wpa_supplicant|netplan-[a-z0-9@-]+|getty@.*|serial-getty@.*|user@.*|"
-                      r"user-runtime-dir@.*|sm-block.*|cron|rsyslog|snapd|unattended-upgrades|apparmor|ufw|nftables|"
-                      r"chrony|systemd)\.service$")
+# A deny list is only as good as its patterns, so the network and login families are matched by prefix
+# (wpa_supplicant@wlp2s0, network-*, networking, ifup@… used to slip through).
+SVC_DENY = re.compile(r"^(ssh|sshd|ssh@.*|sshd@.*|systemd.*|dbus.*|tailscaled|cloudflared|polkit|NetworkManager.*|"
+                      r"network.*|networking|networkd-dispatcher|wpa_supplicant.*|netplan-.*|ifup.*|getty@.*|"
+                      r"serial-getty@.*|console-getty|user@.*|user-runtime-dir@.*|sm-block.*|cron|rsyslog|snapd|"
+                      r"unattended-upgrades|apparmor|ufw|nftables|chrony|cloud-.*)\.service$")
 SVC_ACTIONS = {"start", "stop", "restart", "enable", "disable"}
 
 
