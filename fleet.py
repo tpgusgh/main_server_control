@@ -12,11 +12,13 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
+import alerts
 import healthrules
 import monitor
 import netwatch
+import uxrules
 from agent import IGNORE_FAILED, TZ
-from core import ALERT_TITLES, confirm_password, db, local_name, raise_alert, require_auth
+from core import ALERT_TITLES, IP_LABELS, PUBLIC_HOST, confirm_password, db, local_name, quiet_config, raise_alert, require_auth, set_quiet_config
 from node_agent import hostsec
 from routes_nodes import hub
 
@@ -534,6 +536,7 @@ async def loop():
         try:
             await asyncio.to_thread(ledger.tick)
             await asyncio.to_thread(check_boots)
+            await asyncio.to_thread(quiet_digest)
             await asyncio.to_thread(quality_tick)
             await asyncio.to_thread(check_surge)
             await asyncio.to_thread(energy_tick)
@@ -888,6 +891,63 @@ def netquality(request: Request):
                      "max_ms": round(r["mx"]) if r["mx"] is not None else None,
                      "dbm": last["dbm"] if last else None, "drops": drops})
     return {"rows": rows}
+
+
+def quiet_digest():
+    """Once quiet time is over (or the feature was switched off), send what was held back as one message."""
+    held = db("SELECT kind, message FROM alerts WHERE held=1 ORDER BY id")
+    if not held or uxrules.should_hold("info", quiet_config(), datetime.now(TZ).strftime("%H:%M")):
+        return
+    headline, lines = uxrules.digest([(ALERT_TITLES.get(r["kind"], r["kind"]), r["message"]) for r in held])
+    alerts.push(f"🌅 {headline}\n" + "\n".join(lines),
+                alerts.card(f"🌅 {headline}", "\n".join(f"• {l}" for l in lines), "info", footer=f"{PUBLIC_HOST} · 대시보드 보안 탭에서 전체 보기"))
+    db("UPDATE alerts SET held=0 WHERE held=1")
+
+
+class QuietBody(BaseModel):
+    enabled: bool
+    start: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    end: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+@router.get("/api/quiet")
+def quiet_get(request: Request):
+    require_auth(request)
+    cfg = quiet_config() or {"enabled": False, "start": "23:00", "end": "07:00"}
+    return {**cfg, "held": db("SELECT COUNT(*) c FROM alerts WHERE held=1", one=True)["c"]}
+
+
+@router.post("/api/quiet")
+def quiet_set(request: Request, body: QuietBody):
+    require_auth(request)
+    set_quiet_config(body.model_dump())
+    request.state.event, request.state.detail = "action", f"quiet hours {'on' if body.enabled else 'off'} {body.start}-{body.end}"
+    return {"ok": True}
+
+
+AI_KIND_KR = {"ban_ip": "IP 차단", "block_host": "방화벽 차단", "restart_local": "서비스 재시작", "restart_node": "서비스 재시작",
+              "close_port": "포트를 내부 전용으로"}
+
+
+@router.get("/api/history")
+def history(request: Request, kind: str = "", q: str = "", days: int = 30):
+    """Who did what: admin actions (access log), AI auto-fixes, and system events, newest first."""
+    require_auth(request)
+    since, rows = int(time.time()) - min(max(days, 1), 183) * 86400, []
+    for r in db("SELECT ts, ip, email, event, detail FROM access_log WHERE ts>=? AND event IN ('action','power','upgrade','unban') "
+                "ORDER BY id DESC LIMIT 400", (since,)):
+        who = r["email"] or ("로컬" if r["ip"] in ("127.0.0.1", "::1") else (f"{r['ip']} ({IP_LABELS[r['ip']]})" if r["ip"] in IP_LABELS else r["ip"]))
+        rows.append({"ts": r["ts"], "kind": "관리자", "who": who, "text": uxrules.humanize_action(r["event"], r["detail"] or ""),
+                     "raw": r["detail"]})
+    for r in db("SELECT ts, kind, target, server, status, reason FROM ai_actions WHERE ts>=? ORDER BY id DESC LIMIT 200", (since,)):
+        rows.append({"ts": r["ts"], "kind": "AI", "who": "AI", "raw": r["reason"],
+                     "text": f"{AI_KIND_KR.get(r['kind'], r['kind'])}: {r['target']} ({r['server']}) · {r['status']}"})
+    for r in db("SELECT ts, kind, message FROM alerts WHERE ts>=? AND kind IN ('config_change','reboot','guard') ORDER BY id DESC LIMIT 200", (since,)):
+        rows.append({"ts": r["ts"], "kind": "시스템", "who": "시스템", "raw": r["message"],
+                     "text": f"{ALERT_TITLES.get(r['kind'], r['kind'])}: {' · '.join((r['message'] or '').splitlines())[:140]}"})
+    rows = [r for r in rows if (not kind or r["kind"] == kind) and (not q or q.lower() in (r["text"] + " " + r["who"]).lower())]
+    rows.sort(key=lambda r: -r["ts"])
+    return {"rows": rows[:150]}
 
 
 def _wire_ai():

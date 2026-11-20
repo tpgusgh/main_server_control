@@ -531,6 +531,27 @@
       <tbody id="integrityRows"></tbody>
     </table></div>
 
+    <div class="section-title"><h2>알림 조용한 시간</h2><span class="sub">심각(critical)한 알림은 밤에도 보내고, 나머지는 모아서 끝나는 시각에 한 번에 보내요</span></div>
+    <div class="card">
+      <form class="mem-form sched-form" id="quietForm">
+        <label class="muted"><input type="checkbox" id="quietOn"> 사용</label>
+        <input class="input" type="time" id="quietStart" value="23:00" required aria-label="시작 시각">
+        <span class="muted">~</span>
+        <input class="input" type="time" id="quietEnd" value="07:00" required aria-label="끝나는 시각">
+        <span class="muted">(한국 시간)</span>
+        <button class="btn" type="submit">저장</button>
+        <span class="muted" id="quietHeld"></span>
+      </form>
+    </div>
+
+    <div class="section-title"><h2>작업 이력</h2><span class="sub">누가 언제 무엇을 했는지 · 최근 30일</span>
+      <div class="right"><select class="input" id="histKind" aria-label="구분"><option value="">전체</option><option>관리자</option><option>AI</option><option>시스템</option></select>
+        <input class="input" id="histQ" placeholder="검색" maxlength="40"></div></div>
+    <div class="card table-wrap scroll-y"><table>
+      <thead><tr><th>시각</th><th>누가</th><th>구분</th><th>내용</th></tr></thead>
+      <tbody id="histRows"></tbody>
+    </table></div>
+
     <div class="section-title"><h2>보안 알림</h2><span class="sub" id="alertChannels"></span></div>
     <div class="card table-wrap scroll-y"><table>
       <thead><tr><th>시각</th><th>종류</th><th>IP</th><th>국가</th><th>내용</th></tr></thead>

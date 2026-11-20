@@ -698,3 +698,59 @@ class HealthFeatures(unittest.TestCase):
             self.assertTrue(m.SMART_DEV.match(ok), ok)
         for bad in ("/dev/sda1", "/dev/../etc/passwd", "sda", "/dev/nvme0n1; reboot", "/dev/loop0"):
             self.assertFalse(m.SMART_DEV.match(bad), bad)
+
+
+class UxRules(unittest.TestCase):
+    def test_quiet_window_can_wrap_past_midnight(self):
+        import uxrules
+        for now, want in (("23:30", True), ("00:00", True), ("06:59", True), ("07:00", False), ("12:00", False), ("22:59", False)):
+            self.assertEqual(uxrules.in_quiet(now, "23:00", "07:00"), want, now)
+        self.assertTrue(uxrules.in_quiet("13:00", "12:00", "14:00"))
+        self.assertFalse(uxrules.in_quiet("14:00", "12:00", "14:00"), "end is exclusive")
+        self.assertFalse(uxrules.in_quiet("03:00", "05:00", "05:00"), "start == end means never")
+
+    def test_only_critical_alerts_get_through_quiet_hours(self):
+        import uxrules
+        cfg = {"enabled": True, "start": "23:00", "end": "07:00"}
+        self.assertFalse(uxrules.should_hold("critical", cfg, "03:00"), "critical always goes out")
+        self.assertTrue(uxrules.should_hold("warning", cfg, "03:00"))
+        self.assertTrue(uxrules.should_hold("info", cfg, "03:00"))
+        self.assertFalse(uxrules.should_hold("warning", cfg, "12:00"), "outside the window")
+        self.assertFalse(uxrules.should_hold("warning", {**cfg, "enabled": False}, "03:00"))
+        self.assertFalse(uxrules.should_hold("warning", None, "03:00"))
+
+    def test_digest_groups_by_title(self):
+        import uxrules
+        head, lines = uxrules.digest([("🔄 재부팅", "서버 A 재부팅 완료\n자세히"), ("📦 업그레이드", "x"), ("🔄 재부팅", "서버 B 재부팅 완료")])
+        self.assertEqual(head, "조용한 시간 동안 알림 3건")
+        self.assertEqual(lines[0], "🔄 재부팅 ×2 — 서버 B 재부팅 완료")
+        self.assertEqual(lines[1], "📦 업그레이드 — x")
+
+    def test_terse_action_log_is_said_in_korean(self):
+        import uxrules
+        h = uxrules.humanize_action
+        self.assertEqual(h("action", "restart hi-tunnel.service"), "서비스 다시 켜기: hi-tunnel.service")
+        self.assertEqual(h("action", "stop docker.service (system)"), "서비스 끄기: docker.service (시스템 서비스)")
+        self.assertEqual(h("action", "restart foo.service @ 서브서버 1"), "서비스 다시 켜기: foo.service (서버 서브서버 1)")
+        self.assertEqual(h("action", "power reboot (this server)"), "서버 재부팅 (this server)")
+        self.assertEqual(h("action", "terminate pid 1736 (Unity)"), "프로세스 종료: Unity (PID 1736)")
+        self.assertEqual(h("upgrade", "중앙서버"), "패키지 업그레이드: 중앙서버")
+        self.assertEqual(h("unban", "해제: 1.2.3.4"), "차단 해제: 1.2.3.4")
+        self.assertEqual(h("action", "quiet hours on 23:00-07:00"), "알림 조용한 시간 켜기 (23:00~07:00)")
+        self.assertEqual(h("action", "something new"), "something new", "unknown wording is kept as is")
+
+    def test_discord_commands(self):
+        import uxrules
+        self.assertEqual(uxrules.parse_command("  상태 "), ("status", []))
+        self.assertEqual(uxrules.parse_command("재시작 worldrium  서브서버 1"), ("restart", ["worldrium", "서브서버", "1"]))
+        self.assertEqual(uxrules.parse_command("STATUS"), ("status", []))
+        self.assertIsNone(uxrules.parse_command("안녕"))
+        self.assertIsNone(uxrules.parse_command(""))
+        self.assertEqual(uxrules.restart_target(["worldrium", "서브서버", "1"]), ("worldrium.service", "서브서버 1"))
+        self.assertEqual(uxrules.restart_target(["a.service"]), ("a.service", ""))
+        for bad in (["x;reboot"], ["a b"], [], ["../etc"]):
+            self.assertIsNone(uxrules.restart_target(bad), bad)
+        self.assertEqual(uxrules.parse_restart_id(uxrules.restart_id(None, "a.service")), (None, "a.service"))
+        self.assertEqual(uxrules.parse_restart_id(uxrules.restart_id(3, "a.service")), (3, "a.service"))
+        for bad in ("rs:main:a b", "rs:x:a.service", "confirm:1.2.3.4", "rs:main:"):
+            self.assertIsNone(uxrules.parse_restart_id(bad), bad)
