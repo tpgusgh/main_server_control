@@ -147,7 +147,7 @@ function lineChart(box, pts, { yMax, unit, threshold, fmt, bucket, hours }) {
 
   const now = Date.now() / 1000, t0 = now - hours * 3600;
   const vals = pts.filter((p) => p.v != null);
-  const top = yMax ?? Math.max(1, ...vals.map((p) => p.v)) * 1.15;
+  const top = yMax ?? Math.max(1, ...vals.map((p) => Math.max(p.v, p.max ?? p.v))) * 1.15;
   const x = (t) => m.l + ((t - t0) / (now - t0)) * iw;
   const y = (v) => m.t + ih - (Math.min(v, top) / top) * ih;
 
@@ -183,6 +183,11 @@ function lineChart(box, pts, { yMax, unit, threshold, fmt, bucket, hours }) {
   }
   if (cur.length) segs.push(cur);
   for (const seg of segs) {
+    // bucket peaks: long ranges plot averages, so a 10-second spike would otherwise vanish
+    if (seg.some((p) => p.max != null && p.max - p.v >= 1)) {
+      const dm = seg.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.max ?? p.v).toFixed(1)}`).join("");
+      svg.append(s("path", { d: dm, class: "maxline" }));
+    }
     const d = seg.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join("");
     svg.append(s("path", { d: `${d}L${x(seg[seg.length - 1].t).toFixed(1)},${y(0)}L${x(seg[0].t).toFixed(1)},${y(0)}Z`, class: "area" }));
     svg.append(s("path", { d, class: "line" }));
@@ -323,15 +328,21 @@ function renderCharts() {
 async function loadEvents() {
   const ev = await api("/api/metrics/events");
   thresholds = ev.thresholds;
-  $("thresholds").textContent = `기준: CPU ≥ ${ev.thresholds.cpu}% · 메모리 ≥ ${ev.thresholds.mem}% · 온도 ≥ ${ev.thresholds.temp}°C`;
+  renderLoadEvents(ev, "");
+}
+
+/** Peaks + hot periods; prefix "" = this server's overview, "nd" = a remote server's detail page. */
+function renderLoadEvents(ev, prefix) {
+  const el = (id) => $(prefix ? prefix + id[0].toUpperCase() + id.slice(1) : id);
+  el("thresholds").textContent = `기준: CPU ≥ ${ev.thresholds.cpu}% · 메모리 ≥ ${ev.thresholds.mem}% · 온도 ≥ ${ev.thresholds.temp}°C`;
   const pk = ev.peaks || {};
   const peakBox = (k, v, ts) => h("div", {}, h("div", { class: "k" }, k), h("div", { class: "v num" }, v),
     h("div", { class: "muted" }, ts ? fmtDateTime(ts).slice(5, 16) : "–"));
-  $("peaks").replaceChildren(
+  el("peaks").replaceChildren(
     peakBox("24시간 최고 CPU", pk.cpu != null ? `${pk.cpu.toFixed(1)}%` : "–", pk.cpu_ts),
     peakBox("24시간 최고 메모리", pk.mem != null ? `${pk.mem.toFixed(1)}%` : "–", pk.mem_ts),
     peakBox("24시간 최고 온도", pk.temp != null ? `${pk.temp.toFixed(0)}°C` : "–", pk.temp_ts));
-  $("events").replaceChildren(...(ev.events.length ? ev.events.map((e) => h("li", {},
+  el("events").replaceChildren(...(ev.events.length ? ev.events.map((e) => h("li", {},
     h("span", { class: "when num" }, `${fmtDateTime(e.start).slice(5, 16)}${e.end > e.start ? ` ~ ${fmtTime(e.end)}` : ""}`),
     h("span", {}, e.reasons.map((r) => h("span", { class: "pill crit" }, r)), " "),
     h("span", { class: "muted num" }, `CPU ${e.cpu_max.toFixed(0)}% · 메모리 ${e.mem_max.toFixed(0)}% · ${e.temp_max.toFixed(0)}°C · ${fmtDur(e.end - e.start + 10)}`)))
@@ -369,34 +380,8 @@ async function loadServices() {
   $("lingerNote").textContent = linger === false
     ? "⚠ 사용자 linger 가 꺼져 있어, 자동 실행 서비스는 부팅 후 로그인해야 시작됩니다 (sudo loginctl enable-linger)."
     : "부팅하면 로그인 없이 자동 실행이 켜진 서비스가 시작됩니다.";
-  fill($("services"), services.map((sv) => {
-    const enabled = sv.enabled === "enabled";
-    const canToggle = enabled || sv.enabled === "disabled";
-    const boot = !canToggle
-      ? h("span", { class: "muted", title: "[Install] 섹션이 없어 설정할 수 없음" }, sv.enabled || "–")
-      : h("button", { class: "switch", role: "switch", "aria-checked": String(enabled),
-          "aria-label": `${sv.unit} 부팅 시 자동 실행`, disabled: enabled && sv.protected,
-          title: enabled && sv.protected ? "대시보드 접속에 필요해서 끌 수 없음" : null,
-          onclick: () => serviceAction(sv.unit, enabled ? "disable" : "enable") },
-          h("i", {}), h("span", {}, enabled ? "켜짐" : "꺼짐"));
-    const running = sv.active === "active";
-    const cls = running ? "good" : sv.active === "failed" ? "crit" : sv.active === "activating" || sv.active === "deactivating" ? "warn" : "";
-    return h("tr", {},
-      h("td", {}, h("div", {}, h("b", { class: "mono" }, sv.unit), sv.protected ? h("span", { class: "pill lock", title: "종료 불가" }, "보호") : null),
-        h("div", { class: "muted" }, sv.description || "")),
-      h("td", {}, h("span", { class: `pill ${cls}` }, `${sv.active} (${sv.sub})`)),
-      h("td", { class: "num" }, sv.pid || "–"),
-      h("td", { class: "r num" }, fmtBytes(sv.mem)),
-      h("td", { class: "muted" }, running ? fmtSince(sv.since) : "–"),
-      h("td", { class: "r num" }, sv.restarts ?? "–"),
-      h("td", {}, boot),
-      h("td", { class: "actions" },
-        running ? null : h("button", { class: "btn", onclick: () => serviceAction(sv.unit, "start") }, "켜기"),
-        h("button", { class: "btn", onclick: () => serviceAction(sv.unit, "restart") }, "다시 켜기"),
-        running && !sv.protected ? h("button", { class: "btn danger", onclick: () => serviceAction(sv.unit, "stop") }, "종료") : null,
-        !running && !sv.protected ? h("button", { class: "btn danger", onclick: () => serviceAction(sv.unit, "delete") }, "삭제") : null,
-        h("button", { class: "btn", onclick: () => openLogs(sv.unit, null) }, "로그")));
-  }), 8, "등록된 사용자 서비스가 없습니다");
+  renderServiceRows(services, { act: serviceAction, logs: (unit) => openLogs(unit, null), deletable: true,
+    empty: "서비스가 없습니다" });
 }
 $("svcRefresh").addEventListener("click", () => loadServices().catch((e) => toast(e.message, true)));
 
@@ -476,7 +461,7 @@ const ALERT_KIND = { new_ip: ["새 IP 로그인", "warn"], login_fail: ["로그�
   power: ["전원 조작", "warn"], site_down: ["사이트 다운", "crit"], site_up: ["사이트 복구", "good"],
   login_risk: ["수상한 로그인", "crit"], ai_risk: ["AI 위험 감지", "warn"],
   config_change: ["설정 변경", "warn"], disk_forecast: ["디스크 예측", "warn"], monthly: ["월간 가동률", ""],
-  upgrade: ["업그레이드", ""], ai_case: ["AI 조사", "crit"], exposure: ["인터넷 공개", "crit"], guard: ["외부 차단 설정", "warn"],
+  upgrade: ["업그레이드", ""], ai_case: ["AI 조사", "crit"], cert_expiry: ["인증서 만료", "warn"], weekly: ["주간 리포트", ""], exposure: ["인터넷 공개", "crit"], guard: ["외부 차단 설정", "warn"],
   reboot: ["재부팅 완료", "good"] };
 
 async function unbanIp(b) {
@@ -646,7 +631,30 @@ let aiHistory = [];
 let aiShownReport = null;
 
 /** Safe mini-markdown: **bold** and `code` only, everything else stays plain text. */
+/** Small, safe Markdown for AI text (built with DOM nodes, never innerHTML): bold, code, # headings, tables. */
+const TABLE_ROW = /^\s*\|.*\|\s*$/;
 function md(text) {
+  const lines = String(text).split("\n"), out = [];
+  let buf = [];
+  const flush = () => { if (buf.length) { out.push(...mdInline(buf.join("\n"))); buf = []; } };
+  for (let i = 0; i < lines.length; i++) {
+    if (!TABLE_ROW.test(lines[i])) { buf.push(lines[i].replace(/^#{1,4}\s+(.+)$/, "**$1**")); continue; }
+    const rows = [];
+    while (i < lines.length && TABLE_ROW.test(lines[i])) rows.push(lines[i++]);
+    i--;
+    flush();
+    const cells = (r) => r.trim().slice(1, -1).split("|").map((c) => c.trim());
+    const [head, ...rest] = rows.filter((r) => !/^\s*\|?[\s:|-]+\|?\s*$/.test(r)).map(cells);
+    if (!head) continue;
+    out.push(h("div", { class: "md-table-wrap" }, h("table", { class: "md-table" },
+      h("thead", {}, h("tr", {}, head.map((c) => h("th", {}, ...mdInline(c))))),
+      h("tbody", {}, rest.map((r) => h("tr", {}, r.map((c) => h("td", {}, ...mdInline(c)))))))));
+  }
+  flush();
+  return out;
+}
+
+function mdInline(text) {
   const out = [];
   for (const part of String(text).split(/(\*\*[^*]+\*\*|`[^`]+`)/g)) {
     if (/^\*\*[^*]+\*\*$/.test(part)) out.push(h("b", {}, part.slice(2, -2)));
@@ -843,6 +851,7 @@ $("aiSeg").addEventListener("click", (e) => {
   const v = e.target.closest("button[data-v]");
   if (!v) return;
   aiView = v.dataset.v;
+  if (aiView === "chat") { setChatTarget(); requestAnimationFrame(() => $("aiSeg").scrollIntoView({ block: "start", behavior: "smooth" })); }
   for (const b of $("aiSeg").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b === v));
   for (const el of document.querySelectorAll("[data-aiview]")) el.classList.toggle("hidden", el.dataset.aiview !== aiView);
 });
@@ -895,30 +904,67 @@ async function remember(text) {
   catch (err) { toast(err.message, true); }
 }
 
-function chatBubble(role, text) {
+// ---------------------------------------------------------------- AI chat (chat-app style)
+
+const CHAT_KEY = () => `sm-chat-${currentNode ?? "main"}`;
+function saveChat() {  // per-browser convenience only: survives reloads and tab switches
+  try { sessionStorage.setItem(CHAT_KEY(), JSON.stringify(aiHistory.slice(-24))); } catch { /* private mode etc. */ }
+}
+function chatEmpty(empty) {
+  $("chatSuggest").classList.toggle("hidden", !empty);
+  $("chatLog").classList.toggle("hidden", empty);
+}
+function chatBubble(role, text, ts) {
   const body = h("div", { class: "bubble-body" }, ...md(text || ""));
-  const el = h("div", { class: `bubble ${role}` }, body,
-    role === "user" ? h("button", { class: "bubble-remember", title: "이 말을 AI가 기억하게 하기", onclick: () => remember(text) }, "기억하기") : null);
+  const copy = h("button", { class: "bubble-act", type: "button", title: "답변 복사", onclick: async () => {
+    try { await navigator.clipboard.writeText(body.innerText); copy.textContent = "복사됨"; setTimeout(() => { copy.textContent = "복사"; }, 1500); } catch { /* no clipboard */ }
+  } }, "복사");
+  const acts = role === "user"
+    ? h("button", { class: "bubble-act", type: "button", title: "이 말을 AI가 기억하게 하기", onclick: () => remember(text) }, "기억하기")
+    : copy;
+  const el = h("div", { class: `msg ${role}` },
+    role === "assistant" ? h("span", { class: "ai-avatar sm", "aria-hidden": "true" }, "AI") : null,
+    h("div", { class: "msg-col" }, h("div", { class: `bubble ${role}` }, body),
+      h("div", { class: "bubble-meta" }, fmtTime((ts || Date.now()) / 1000), " ", acts)));
   $("chatLog").append(el);
+  chatEmpty(false);
   $("chatLog").scrollTop = $("chatLog").scrollHeight;
   return body;
+}
+function restoreChat() {
+  $("chatLog").replaceChildren();
+  try { aiHistory = JSON.parse(sessionStorage.getItem(CHAT_KEY()) || "[]"); } catch { aiHistory = []; }
+  for (const m of aiHistory) chatBubble(m.role, m.content, m.ts);
+  chatEmpty(!aiHistory.length);
+}
+function setChatTarget() {
+  const name = currentNode != null ? ((nodeCache && nodeCache.id === currentNode && nodeCache.name) || "원격 서버") : (lastStatus && (lastStatus.name || lastStatus.host)) || "이 서버";
+  $("chatTarget").textContent = `${name} 데이터로 답합니다 · 조치는 버튼으로 제안하고, 눌러야 실행돼요`;
+}
+function growInput() {
+  const t = $("chatInput");
+  t.style.height = "auto";
+  t.style.height = `${Math.min(t.scrollHeight, 160)}px`;
 }
 
 async function askAi(question) {
   question = question.trim();
-  if (!question) return;
+  if (!question || $("chatSend").disabled) return;
   $("chatSend").disabled = true;
-  $("chatSuggest").classList.add("hidden");
   chatBubble("user", question);
+  const sent = Date.now(), prior = aiHistory.slice(-12).map(({ role, content }) => ({ role, content }));
+  aiHistory.push({ role: "user", content: question, ts: sent });  // kept even if the reply fails or the page reloads
+  saveChat();
   const out = chatBubble("assistant", "");
-  const status = h("span", { class: "muted" }, "연결 중…");
-  out.append(status);
+  const typing = h("span", { class: "typing", "aria-label": "답변 작성 중" }, h("i"), h("i"), h("i"));
+  const status = h("span", { class: "muted typing-text" }, "");
+  out.append(typing, status);
   let answer = "";
   try {
     const res = await fetch("/api/ai/chat", {
       method: "POST", credentials: "same-origin",
       headers: { "Content-Type": "application/json", "X-CSRF-Token": CSRF },
-      body: JSON.stringify({ question, history: aiHistory, node: currentNode }),
+      body: JSON.stringify({ question, history: prior, node: currentNode }),
     });
     if (res.status === 401) { location.replace("/login"); return; }
     if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.detail || `오류 ${res.status}`); }
@@ -937,19 +983,46 @@ async function askAi(question) {
         if (ev.error) throw new Error(ev.error);
         if (ev.t) { answer += ev.t; out.replaceChildren(...md(answer)); $("chatLog").scrollTop = $("chatLog").scrollHeight; }
         if (ev.memory) loadMemory().catch(() => {});
-        if (ev.done && ev.tps) out.parentElement.append(h("div", { class: "bubble-meta" },
-          `${ev.tps.toFixed(1)} 토큰/초${ev.past ? ` · 지난 대화 ${ev.past}개 참고` : ""}`));
+        if (ev.actions) out.closest(".msg-col").append(chatActions(ev.actions));
+        if (ev.done && ev.past) out.closest(".msg-col").querySelector(".bubble-meta").append(` · 지난 대화 ${ev.past}개 참고`);
       }
     }
-    aiHistory.push({ role: "user", content: question }, { role: "assistant", content: answer });
-    aiHistory = aiHistory.slice(-12);
+    aiHistory.push({ role: "assistant", content: answer, ts: Date.now() });
+    aiHistory = aiHistory.slice(-24);
+    saveChat();
     loadChats().catch(() => {});
   } catch (err) {
     out.replaceChildren(h("span", { class: "err-text" }, err.message));
   } finally {
     $("chatSend").disabled = false;
+    $("chatInput").focus();
   }
 }
+
+/** Buttons for what the AI proposed. Nothing runs without a click + confirm, and the server re-checks on click. */
+function chatActions(list) {
+  return h("div", { class: "chat-actions" }, list.map((a) => {
+    const risky = ["stop", "disable", "terminate"].includes(a.action);
+    const b = h("button", { class: `btn ${risky ? "danger" : "primary"}`, type: "button", onclick: async () => {
+      if (!(await confirmDialog(a.label, `${a.reason ? `${a.reason}\n\n` : ""}AI가 제안한 조치입니다. 실행할까요?`, risky))) return;
+      b.disabled = true; b.textContent = "실행 중…";
+      try {
+        const base = a.node != null ? `/api/nodes/${a.node}` : "/api";
+        const r = await post(a.action === "terminate" ? `${base}/process/${encodeURIComponent(a.target)}/terminate`
+          : `${base}/services/${encodeURIComponent(a.target)}/${a.action}`);
+        b.textContent = `✓ ${a.label}`;
+        toast(r.detail || "실행했습니다.");
+        if (activeTab === "services") loadServices().catch(() => {});
+      } catch (err) { b.disabled = false; b.textContent = a.label; toast(err.message, true); }
+    } }, a.label);
+    return h("div", { class: "chat-action" }, b, a.reason ? h("span", { class: "muted" }, a.reason) : null);
+  }));
+}
+
+$("chatNew").addEventListener("click", () => {
+  aiHistory = []; saveChat(); $("chatLog").replaceChildren(); chatEmpty(true); $("chatInput").focus();
+});
+$("chatInput").addEventListener("input", growInput);
 
 async function loadMemory() {
   const { memories, max } = await api("/api/ai/memory");
@@ -1072,16 +1145,21 @@ function copyBlock(text) {
 }
 function agentUpdateHelp(n, latest) {
   const dest = `${n.user || "<사용자>"}@${n.address.split(":")[0]}`;
+  const btn = h("button", { class: "btn primary", type: "button", onclick: async () => {
+    btn.disabled = true; btn.textContent = "업데이트 중… (1분 정도)";
+    try { await post(`/api/fleet/update-agent/${n.id}`); toast(`${n.name} 에이전트를 ${latest}로 업데이트했습니다.`); $("reportModal").close(); loadServers().catch(() => {}); }
+    catch (err) { btn.disabled = false; btn.textContent = "지금 업데이트"; toast(err.message, true); }
+  } }, "지금 업데이트");
   put($("reportBody"),
     h("div", { class: "modal-head" }, h("h3", {}, `${n.name} 에이전트 업데이트 (${n.version || "?"} → ${latest})`),
       h("button", { class: "btn", type: "button", onclick: () => $("reportModal").close() }, "닫기")),
-    h("p", {}, "두 번에 나눠 실행합니다. 토큰·설정은 그대로 유지됩니다."),
-    h("p", {}, h("b", {}, "① 중앙서버 터미널에서"), ` (${location.hostname} 이 돌아가는 서버, ~/server-monitor 가 있는 곳) — 파일 보내기`),
-    copyBlock(`scp -r ~/server-monitor/node_agent ${dest}:~/`),
-    h("p", {}, h("b", {}, `② ${n.name} 터미널에서`), ` (ssh ${dest} 로 들어가서) — 에이전트 재설치 + 방화벽·업그레이드 도구 설치 (sudo 비밀번호 물어봄)`),
-    copyBlock(`bash ~/node_agent/install.sh ${DASHBOARD_TS_IP} && sudo bash ~/node_agent/install-blocker.sh`),
-    n.user ? null : h("p", { class: "muted" }, "계정 이름을 몰라 <사용자>로 남겼습니다 — 붙여넣기 전에 그 서버의 로그인 계정으로 바꾸세요."),
-    h("p", { class: "muted" }, "대시보드가 코드를 원격으로 밀어 넣는 방식은 일부러 만들지 않았습니다 — 토큰이 새면 그 서버에서 아무 코드나 실행되는 통로가 되기 때문입니다."));
+    h("p", {}, "중앙서버에서 SSH 키로 접속해 에이전트 파일을 보내고 다시 설치합니다. 토큰·설정은 그대로 유지됩니다."),
+    h("div", { class: "card-foot" }, btn, h("span", { class: "muted" }, "그 서버에 키 접속(ssh-copy-id)이 한 번 설정돼 있어야 해요")),
+    h("p", {}, h("b", {}, "터미널에서 하려면"), " (중앙서버에서 한 줄)"),
+    copyBlock(`~/server-monitor/scripts/update-agent.sh ${dest}`),
+    h("p", {}, h("b", {}, "방화벽·업그레이드·시스템 서비스 제어 도구(sm-block)까지"), " 업데이트하려면 — 그 서버의 sudo 비밀번호를 한 번 물어봐요"),
+    copyBlock(`~/server-monitor/scripts/update-agent.sh --blocker ${dest}`),
+    n.user ? null : h("p", { class: "muted" }, "계정 이름을 몰라 <사용자>로 남겼습니다 — 그 서버의 로그인 계정으로 바꾸세요."));
   $("reportModal").showModal();
 }
 async function upgradeServer(r) {
@@ -1283,8 +1361,12 @@ async function loadChats() {
   $("chatsMeta").textContent = `${d.total.toLocaleString()}건 · 1년 보관`;
   $("chatHistory").replaceChildren(...(d.chats.length ? d.chats.map((c) => h("li", {},
     h("div", { class: "muted" }, fmtDateTime(c.ts), " · ", c.ip, c.label ? ` (${c.label})` : ""),
-    h("div", {}, h("b", {}, "Q. "), c.question),
-    h("details", {}, h("summary", { class: "ink2" }, "답변 보기"), h("div", { class: "answer" }, ...md(c.answer))))) : [h("li", { class: "muted" }, "기록이 없습니다")]));
+    h("div", { class: "q-clamp", title: c.question }, h("b", {}, "Q. "), c.question),
+    h("details", {}, h("summary", { class: "ink2" }, "답변 보기"), h("div", { class: "answer" }, ...md(c.answer)),
+      h("button", { class: "btn", type: "button", onclick: () => {
+        aiHistory = [{ role: "user", content: c.question, ts: c.ts * 1000 }, { role: "assistant", content: c.answer, ts: c.ts * 1000 }];
+        saveChat(); restoreChat(); $("chatInput").focus();
+      } }, "이 대화 이어가기")))) : [h("li", { class: "muted" }, "기록이 없습니다")]));
   $("chatsPrev").disabled = chatsPage === 0;
   $("chatsNext").disabled = (chatsPage + 1) * 20 >= d.total;
 }
@@ -1292,7 +1374,7 @@ $("chatsQ").addEventListener("input", () => { clearTimeout(chatsTimer); chatsTim
 $("chatsPrev").addEventListener("click", () => { chatsPage--; loadChats(); });
 $("chatsNext").addEventListener("click", () => { chatsPage++; loadChats(); });
 
-$("chatForm").addEventListener("submit", (e) => { e.preventDefault(); const q = $("chatInput").value; $("chatInput").value = ""; askAi(q); });
+$("chatForm").addEventListener("submit", (e) => { e.preventDefault(); const q = $("chatInput").value; $("chatInput").value = ""; growInput(); askAi(q); });
 $("chatInput").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("chatForm").requestSubmit(); } });
 $("chatSuggest").addEventListener("click", (e) => { const b = e.target.closest("button[data-q]"); if (b) askAi(b.dataset.q); });
 
@@ -1345,8 +1427,9 @@ function applyView() {
   const remote = currentNode != null;
   if (applyView.last !== currentNode) {  // new server: start a fresh AI conversation about it
     applyView.last = currentNode;
-    aiHistory = []; $("chatLog").replaceChildren(); $("chatSuggest").classList.remove("hidden"); aiShownReport = undefined;
+    restoreChat(); aiShownReport = undefined;
   }
+  setChatTarget();
   $("viewBanner").classList.toggle("hidden", !remote);
   if (remote) {
     const n = nodeCache && nodeCache.id === currentNode ? nodeCache : null, d = (n && n.data) || {};
@@ -1385,7 +1468,7 @@ function renderNode(n) {
   $("ndMeta").textContent = n.online ? `${d.host} · ${n.address} · ${d.os || ""} · 가동 ${fmtDur(d.uptime)}` : `${n.address} · ${n.error || "연결 끊김"}`;
   $("ndScope").textContent = agentOld(d.version)
     ? `⚠ 에이전트 ${d.version || "구버전"} — 시스템 서비스·포트를 보려면 그 서버에 에이전트를 다시 설치하세요 (토큰 유지)`
-    : "사용자 서비스는 제어 가능 · 시스템 서비스는 보기 전용 (root 필요)";
+    : "사용자 서비스는 제어 가능 · 시스템 서비스는 최신 sm-block(install-blocker.sh)이 있으면 제어 가능 (ssh·tailscale 등 핵심 서비스 제외)";
   if (x) {
     $("ndTiles").replaceChildren(
       tile("CPU", x.cpu.toFixed(1), "%", `${d.cpu_count}코어`, x.cpu, level(x.cpu, 60, 80)),
@@ -1428,16 +1511,27 @@ async function nodeServiceAction(n, unit, action) {
   catch (err) { toast(err.message, true); }
 }
 
+let ndHours = 24;
+$("ndRange").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-h]");
+  if (!btn) return;
+  ndHours = Number(btn.dataset.h);
+  for (const b of $("ndRange").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b === btn));
+  loadNodeMetrics().catch((err) => toast(err.message, true));
+});
+
 async function loadNodeMetrics() {
   if (currentNode == null) return;
-  const m = await api(`/api/nodes/${currentNode}/metrics?hours=24`);
+  const nid = currentNode;
+  api(`/api/nodes/${nid}/events`).then((ev) => nid === currentNode && renderLoadEvents(ev, "nd")).catch(() => {});
+  const m = await api(`/api/nodes/${nid}/metrics?hours=${ndHours}`);
   const P = m.points, b = m.bucket;
   const pct = (v, sh) => `${v.toFixed(sh ? 0 : 1)}%`, deg = (v, sh) => `${v.toFixed(0)}${sh ? "°" : "°C"}`;
   const peak = (key, f) => { const vs = P.filter((p) => p[key] != null); if (!vs.length) return ""; const t = vs.reduce((a, c) => (c[key] > a[key] ? c : a)); return `최고 ${f(t[key])} · ${fmtTime(t.t)}`; };
-  lineChart($("ndChartCpu"), P.map((p) => ({ t: p.t, v: p.cpu, max: p.cpu_max })), { yMax: 100, threshold: 80, fmt: pct, bucket: b, hours: 24 });
-  lineChart($("ndChartMem"), P.map((p) => ({ t: p.t, v: p.mem })), { yMax: 100, threshold: 90, fmt: pct, bucket: b, hours: 24 });
-  lineChart($("ndChartTemp"), P.map((p) => ({ t: p.t, v: p.temp, max: p.temp_max })), { yMax: 100, threshold: 85, fmt: deg, bucket: b, hours: 24 });
-  lineChart($("ndChartLoad"), P.map((p) => ({ t: p.t, v: p.load1 })), { fmt: (v) => v.toFixed(2), bucket: b, hours: 24 });
+  lineChart($("ndChartCpu"), P.map((p) => ({ t: p.t, v: p.cpu, max: p.cpu_max })), { yMax: 100, threshold: 80, fmt: pct, bucket: b, hours: ndHours });
+  lineChart($("ndChartMem"), P.map((p) => ({ t: p.t, v: p.mem })), { yMax: 100, threshold: 90, fmt: pct, bucket: b, hours: ndHours });
+  lineChart($("ndChartTemp"), P.map((p) => ({ t: p.t, v: p.temp, max: p.temp_max })), { yMax: 100, threshold: 85, fmt: deg, bucket: b, hours: ndHours });
+  lineChart($("ndChartLoad"), P.map((p) => ({ t: p.t, v: p.load1 })), { fmt: (v) => v.toFixed(2), bucket: b, hours: ndHours });
   $("ndLoadPeak").textContent = peak("load1", (v) => v.toFixed(2));
   $("ndCpuPeak").textContent = peak("cpu_max", (v) => pct(v)); $("ndMemPeak").textContent = peak("mem", (v) => pct(v)); $("ndTempPeak").textContent = peak("temp_max", (v) => deg(v));
 }
@@ -1515,31 +1609,41 @@ const oldAgentNote = (d) => agentOld(d.version) ? `⚠ 에이전트 ${d.version 
 
 function renderNodeServices(n) {
   const d = n.data || {};
-  $("lingerNote").textContent = oldAgentNote(d) || "사용자 서비스는 제어 가능 · 시스템 서비스는 보기 전용 (root 필요)";
-  const svcs = [...(d.services || [])].sort((a, b) => (a.active === "failed" ? -1 : 0) - (b.active === "failed" ? -1 : 0)
+  $("lingerNote").textContent = oldAgentNote(d) || "사용자 서비스는 제어 가능 · 시스템 서비스는 최신 sm-block(install-blocker.sh)이 있으면 제어 가능 (ssh·tailscale 등 핵심 서비스 제외)";
+  renderServiceRows(d.services || [], { act: (unit, a) => nodeServiceAction(n, unit, a),
+    logs: agentBelow(d.version, 7) ? null : (unit) => openLogs(unit, n), deletable: !agentBelow(d.version, 6),
+    empty: n.online ? "등록된 서비스가 없습니다" : "서버에 연결할 수 없습니다" });
+}
+
+/** One service table for this server and remote ones: user services are controllable, system ones view-only. */
+function renderServiceRows(list, { act, logs, deletable, empty }) {
+  const svcs = [...list].sort((a, b) => (a.active === "failed" ? -1 : 0) - (b.active === "failed" ? -1 : 0)
     || (b.controllable !== false) - (a.controllable !== false) || a.unit.localeCompare(b.unit));
   fill($("services"), svcs.map((sv) => {
-    const ctl = sv.controllable !== false;  // agents < 1.2 only reported controllable user units
+    const root = sv.controllable === false && sv.root;  // system service, controllable through root sm-block
+    const ctl = sv.controllable !== false || root;  // agents < 1.2 only reported controllable user units
     const running = sv.active === "active", enabled = sv.enabled === "enabled";
-    const cls = running ? "good" : sv.active === "failed" ? "crit" : "";
-    const act = (a) => nodeServiceAction(n, sv.unit, a);
+    const cls = running ? "good" : sv.active === "failed" ? "crit" : sv.active === "activating" || sv.active === "deactivating" ? "warn" : "";
     return h("tr", {},
-      h("td", {}, h("b", { class: "mono" }, sv.unit), sv.protected ? h("span", { class: "pill lock" }, "보호") : null,
+      h("td", {}, h("b", { class: "mono" }, sv.unit), sv.protected ? h("span", { class: "pill lock", title: "종료 불가" }, "보호") : null,
         h("span", { class: "pill scope" }, sv.scope === "system" ? "시스템" : "사용자"), h("div", { class: "muted" }, sv.description || "")),
       h("td", {}, h("span", { class: `pill ${cls}` }, `${sv.active} (${sv.sub})`)), h("td", { class: "num" }, sv.pid || "–"),
-      h("td", { class: "r num muted" }, "–"), h("td", { class: "muted" }, running ? fmtSince(sv.since) : "–"),
+      h("td", { class: "r num" }, sv.mem != null ? fmtBytes(sv.mem) : h("span", { class: "muted" }, "–")),
+      h("td", { class: "muted" }, running ? fmtSince(sv.since) : "–"),
       h("td", { class: "r num" }, sv.restarts ?? "–"),
       h("td", {}, ctl && (enabled || sv.enabled === "disabled")
-        ? h("button", { class: "switch", role: "switch", "aria-checked": String(enabled), disabled: enabled && sv.protected, onclick: () => act(enabled ? "disable" : "enable") }, h("i", {}), h("span", {}, enabled ? "켜짐" : "꺼짐"))
+        ? h("button", { class: "switch", role: "switch", "aria-checked": String(enabled), "aria-label": `${sv.unit} 부팅 시 자동 실행`,
+            disabled: enabled && sv.protected, title: enabled && sv.protected ? "대시보드 접속에 필요해서 끌 수 없음" : null,
+            onclick: () => act(sv.unit, enabled ? "disable" : "enable") }, h("i", {}), h("span", {}, enabled ? "켜짐" : "꺼짐"))
         : h("span", { class: "muted" }, enabled ? "켜짐" : sv.enabled || "–")),
       h("td", { class: "actions" }, ctl ? [
-        running ? null : h("button", { class: "btn", onclick: () => act("start") }, "켜기"),
-        h("button", { class: "btn", onclick: () => act("restart") }, "다시 켜기"),
-        running && !sv.protected ? h("button", { class: "btn danger", onclick: () => act("stop") }, "종료") : null,
-        !running && !sv.protected && !agentBelow(d.version, 6) ? h("button", { class: "btn danger", onclick: () => act("delete") }, "삭제") : null]
+        running ? null : h("button", { class: "btn", onclick: () => act(sv.unit, "start") }, "켜기"),
+        h("button", { class: "btn", onclick: () => act(sv.unit, "restart") }, "다시 켜기"),
+        running && !sv.protected ? h("button", { class: "btn danger", onclick: () => act(sv.unit, "stop") }, "종료") : null,
+        !running && !sv.protected && deletable && !root ? h("button", { class: "btn danger", onclick: () => act(sv.unit, "delete") }, "삭제") : null]
         : h("span", { class: "muted", title: `그 서버에서: sudo systemctl restart ${sv.unit}` }, "보기 전용"),
-        agentBelow(d.version, 7) ? null : h("button", { class: "btn", onclick: () => openLogs(sv.unit, n) }, "로그")));
-  }), 8, n.online ? "등록된 서비스가 없습니다" : "서버에 연결할 수 없습니다");
+        logs ? h("button", { class: "btn", onclick: () => logs(sv.unit) }, "로그") : null));
+  }), 8, empty);
 }
 
 async function nodeKill(n, pid, name) {
@@ -1670,11 +1774,14 @@ async function loadSites() {
     h("td", {}, x.ok == null ? h("span", { class: "pill" }, "확인 중")
       : h("span", { class: `pill ${x.ok ? "good" : "crit"}` }, x.ok ? `정상 ${x.code}` : (x.code ? `오류 ${x.code}` : "응답 없음"))),
     h("td", { class: "r num" }, x.ms != null ? `${x.ms}ms` : "–"),
+    h("td", {}, x.cert_error ? h("span", { class: "pill crit", title: x.cert_error }, "확인 실패")
+      : x.cert_days == null ? h("span", { class: "muted" }, x.url.startsWith("https") ? "확인 중" : "http")
+      : h("span", { class: `pill ${x.cert_days <= 14 ? "crit" : x.cert_days <= 30 ? "warn" : "good"}` }, `${x.cert_days}일 남음`)),
     h("td", { class: "muted" }, x.ts ? fmtAgo(x.ts) : "–"), h("td", { class: "muted" }, x.since ? fmtDur(Date.now() / 1000 - x.since) : "–"),
     h("td", { class: "actions" }, h("button", { class: "btn danger", onclick: async () => {
       if (!(await confirmDialog("감시 해제", `${x.name} (${x.url}) 감시를 그만할까요?`, true))) return;
       await post("/api/sites/delete", { url: x.url }); loadSites();
-    } }, "삭제")))), 7, "등록된 웹사이트가 없습니다");
+    } }, "삭제")))), 8, "등록된 웹사이트가 없습니다");
 }
 $("siteForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -1794,3 +1901,5 @@ window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer
   api("/api/nodes").then(fillServerSel).catch(() => {});
   selectTab(start);
 })();
+
+restoreChat();  // the AI tab may be the first one shown: bring back this browser's conversation now

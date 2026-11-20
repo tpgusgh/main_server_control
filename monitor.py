@@ -202,9 +202,11 @@ def metrics(request: Request, hours: float = 24):
     return {"bucket": bucket, "points": [dict(r) for r in rows]}
 
 
-def load_events_data():
-    """Contiguous periods in the last 24h where CPU/memory/temperature crossed the hot thresholds."""
-    rows = db("SELECT ts,cpu,mem,temp FROM metrics WHERE ts>=? ORDER BY ts", (int(time.time()) - METRIC_RETENTION,))
+def load_events_data(node_id: int | None = None):
+    """Contiguous periods in the last 24h where CPU/memory/temperature crossed the hot thresholds
+    (this server, or a remote one from node_metrics — same 10 s sampling)."""
+    tbl, only = ("metrics", "") if node_id is None else ("node_metrics", f"node_id={int(node_id)} AND ")
+    rows = db(f"SELECT ts,cpu,mem,temp FROM {tbl} WHERE {only}ts>=? ORDER BY ts", (int(time.time()) - METRIC_RETENTION,))
     events, cur = [], None
     for r in rows:
         reasons = [k for k, v, lim in (("CPU", r["cpu"], CPU_HOT), ("메모리", r["mem"], MEM_HOT),
@@ -222,12 +224,10 @@ def load_events_data():
                 events.append(cur)
     for e in events:
         e["reasons"] = sorted(e["reasons"])
-    peaks = db("SELECT (SELECT ts FROM metrics WHERE ts>=?1 ORDER BY cpu DESC LIMIT 1) cpu_ts, "
-               "(SELECT MAX(cpu) FROM metrics WHERE ts>=?1) cpu, "
-               "(SELECT ts FROM metrics WHERE ts>=?1 ORDER BY mem DESC LIMIT 1) mem_ts, "
-               "(SELECT MAX(mem) FROM metrics WHERE ts>=?1) mem, "
-               "(SELECT ts FROM metrics WHERE ts>=?1 AND temp IS NOT NULL ORDER BY temp DESC LIMIT 1) temp_ts, "
-               "(SELECT MAX(temp) FROM metrics WHERE ts>=?1) temp",
+    w = f"FROM {tbl} WHERE {only}ts>=?1"
+    peaks = db(f"SELECT (SELECT ts {w} ORDER BY cpu DESC LIMIT 1) cpu_ts, (SELECT MAX(cpu) {w}) cpu, "
+               f"(SELECT ts {w} ORDER BY mem DESC LIMIT 1) mem_ts, (SELECT MAX(mem) {w}) mem, "
+               f"(SELECT ts {w} AND temp IS NOT NULL ORDER BY temp DESC LIMIT 1) temp_ts, (SELECT MAX(temp) {w}) temp",
                (int(time.time()) - METRIC_RETENTION,), one=True)
     return {"thresholds": {"cpu": CPU_HOT, "mem": MEM_HOT, "temp": TEMP_HOT},
             "events": list(reversed(events))[:100], "peaks": dict(peaks) if peaks else {}}
@@ -252,35 +252,59 @@ def managed_units() -> list[str]:
     return sorted(p.name for p in USER_UNIT_DIR.glob("*.service") if p.is_file() and UNIT_RE.match(p.name))
 
 
-def services_data():
-    units = managed_units()
+def system_units(include_stopped: bool = False) -> list[str]:
+    """Running or failed system services (docker, databases, ssh, ...); with include_stopped, every loaded one
+    (so a service stopped from here can be started again)."""
+    try:
+        r = subprocess.run(["systemctl", "list-units", "--type=service", "--no-legend", "--plain",
+                            "--all" if include_stopped else "--state=running,failed"],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return sorted({l.split()[0] for l in r.stdout.splitlines() if l.split() and UNIT_RE.match(l.split()[0])})[:100]
+
+
+def _show_units(units: list[str], system: bool) -> list[dict]:
+    root_ok = system and "svc" in hostsec.caps()
+    props = "Id,Description,ActiveState,SubState,MainPID,ActiveEnterTimestamp,UnitFileState,NRestarts"
+    args = ("show", *units, "-p", props, "--timestamp=unix")
+    res = subprocess.run(["systemctl", *args], capture_output=True, text=True, timeout=10) if system else _systemctl(*args)
     out = []
-    if units:
-        props = "Id,Description,ActiveState,SubState,MainPID,ActiveEnterTimestamp,UnitFileState,NRestarts"
-        res = _systemctl("show", *units, "-p", props, "--timestamp=unix")
-        for block in res.stdout.strip().split("\n\n"):
-            d = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
-            pid = int(d.get("MainPID") or 0)
-            cpu = mem = None
-            if pid:
-                try:
-                    p = psutil.Process(pid)
-                    rss = p.memory_info().rss
-                    for c in p.children(recursive=True):
-                        try:
-                            rss += c.memory_info().rss
-                        except psutil.Error:
-                            pass
-                    mem = rss
-                    cpu = p.cpu_percent(interval=None)
-                except psutil.Error:
-                    pass
-            out.append({"unit": d.get("Id"), "description": d.get("Description"),
-                        "active": d.get("ActiveState"), "sub": d.get("SubState"), "pid": pid or None,
-                        "since": int(d["ActiveEnterTimestamp"][1:]) if d.get("ActiveEnterTimestamp", "").startswith("@") else None,
-                        "enabled": d.get("UnitFileState"),
-                        "restarts": d.get("NRestarts"), "mem": mem, "cpu": cpu,
-                        "protected": d.get("Id") in PROTECTED_UNITS})
+    for block in res.stdout.strip().split("\n\n"):
+        d = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+        if not d.get("Id"):
+            continue
+        pid = int(d.get("MainPID") or 0)
+        cpu = mem = None
+        if pid:
+            try:
+                p = psutil.Process(pid)
+                rss = p.memory_info().rss
+                for c in p.children(recursive=True):
+                    try:
+                        rss += c.memory_info().rss
+                    except psutil.Error:
+                        pass
+                mem = rss
+                cpu = p.cpu_percent(interval=None)
+            except psutil.Error:
+                pass
+        out.append({"unit": d.get("Id"), "description": d.get("Description"),
+                    "active": d.get("ActiveState"), "sub": d.get("SubState"), "pid": pid or None,
+                    "since": int(d["ActiveEnterTimestamp"][1:]) if d.get("ActiveEnterTimestamp", "").startswith("@") else None,
+                    "enabled": d.get("UnitFileState"), "restarts": d.get("NRestarts"), "mem": mem, "cpu": cpu,
+                    "protected": d.get("Id") in PROTECTED_UNITS,
+                    "scope": "system" if system else "user", "controllable": not system,
+                    **({"root": True} if system and root_ok else {})})
+    return out
+
+
+def services_data():
+    """User services (controllable) + running/failed system services (view-only: changing them needs root)."""
+    units = managed_units()
+    out = _show_units(units, False) if units else []
+    sysu = [u for u in system_units() if u not in units]
+    out += _show_units(sysu, True) if sysu else []
     try:
         linger = subprocess.run(["loginctl", "show-user", str(os.getuid()), "-p", "Linger", "--value"],
                                 capture_output=True, text=True, timeout=5).stdout.strip() == "yes"
@@ -300,6 +324,12 @@ def service_action(request: Request, unit: str, action: str):
     require_auth(request)
     if action not in ("start", "stop", "restart", "enable", "disable", "delete"):
         raise HTTPException(400, "unknown action")
+    if UNIT_RE.match(unit) and unit not in managed_units() and action != "delete" and unit in system_units(include_stopped=True):
+        request.state.event, request.state.detail = "action", f"{action} {unit} (system)"
+        ok, msg = hostsec.system_service(action, unit)  # root sm-block re-checks the deny list
+        if not ok:
+            raise HTTPException(409, msg)
+        return {"ok": True, "detail": msg}
     if not UNIT_RE.match(unit) or unit not in managed_units():
         raise HTTPException(404, "unknown unit")
     if action == "delete":
@@ -398,13 +428,11 @@ def network(request: Request):
 @router.post("/api/process/{pid}/terminate")
 def terminate(request: Request, pid: int):
     require_auth(request)
-    listen_pids = {c.pid for c in psutil.net_connections(kind="inet") if c.status == psutil.CONN_LISTEN}
-    if pid not in listen_pids or pid in _protected_pids():
-        raise HTTPException(403, "이 프로세스는 종료할 수 없습니다.")
+    ok, why = hostsec.killable(pid, PROTECTED_UNITS, _protected_pids())
+    if not ok:
+        raise HTTPException(404 if "없습니다" in why else 403, why)
     try:
         p = psutil.Process(pid)
-        if p.uids().real != os.getuid():
-            raise HTTPException(403, "다른 사용자의 프로세스입니다.")
         request.state.event = "action"
         request.state.detail = f"terminate pid {pid} ({p.name()})"
         p.send_signal(signal.SIGTERM)
@@ -538,9 +566,10 @@ def hostblock_remove(request: Request, body: KeyBody):
 @router.get("/api/services/{unit}/logs")
 def service_logs(request: Request, unit: str, lines: int = 200):
     require_auth(request)
-    if not UNIT_RE.match(unit) or unit not in managed_units():
+    user = unit in managed_units()
+    if not UNIT_RE.match(unit) or not (user or unit in system_units()):
         raise HTTPException(404, "unknown unit")
-    return {"unit": unit, "log": hostsec.service_logs(unit, lines, user=True)}
+    return {"unit": unit, "log": hostsec.service_logs(unit, lines, user=user)}
 
 
 _updates: dict = {"data": None, "t": 0.0}

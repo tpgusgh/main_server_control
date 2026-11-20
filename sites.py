@@ -1,6 +1,9 @@
 """Website uptime checks: GET each registered URL every 2 minutes; alert when it stays down / comes back."""
 import asyncio
+import socket
+import ssl
 import time
+import urllib.parse
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -11,6 +14,7 @@ from core import _cfg_lock, raise_alert, require_auth
 
 INTERVAL = 120
 DOWN_AFTER = 2          # consecutive failures before alerting (one blip is not an outage)
+CERT_EVERY, CERT_WARN_DAYS = 6 * 3600, 14
 router = APIRouter()
 state: dict[str, dict] = {}  # url -> {ok, code, ms, ts, fails, since, error}
 _client = httpx.AsyncClient(timeout=httpx.Timeout(10, connect=5), follow_redirects=False,
@@ -26,6 +30,33 @@ def is_up(code: int | None) -> bool:
     return code is not None and code < 500
 
 
+def cert_days(url: str) -> int | None:
+    """Days until the HTTPS certificate expires (None for plain http). Raises ssl.SSLError when it doesn't verify."""
+    u = urllib.parse.urlsplit(url)
+    if u.scheme != "https" or not u.hostname:
+        return None
+    with socket.create_connection((u.hostname, u.port or 443), timeout=8) as raw, \
+            ssl.create_default_context().wrap_socket(raw, server_hostname=u.hostname) as tls:
+        expires = ssl.cert_time_to_seconds(tls.getpeercert()["notAfter"])
+    return int((expires - time.time()) // 86400)
+
+
+async def check_cert(site: dict, st: dict):
+    st["cert_ts"] = int(time.time())
+    try:
+        days, st["cert_error"] = await asyncio.to_thread(cert_days, site["url"]), None
+    except (OSError, ssl.SSLError, ValueError) as e:
+        days = None
+        st["cert_error"] = f"인증서 확인 실패 ({type(e).__name__})"
+        if isinstance(e, ssl.SSLCertVerificationError):
+            await asyncio.to_thread(raise_alert, "cert_expiry", urllib.parse.urlsplit(site["url"]).hostname or "", "",
+                                    f"웹사이트 '{site['name']}' SSL 인증서가 유효하지 않음 — {e.verify_message} ({site['url']})", 86400)
+    st["cert_days"] = days
+    if days is not None and days <= CERT_WARN_DAYS:
+        await asyncio.to_thread(raise_alert, "cert_expiry", urllib.parse.urlsplit(site["url"]).hostname or "", "",
+                                f"웹사이트 '{site['name']}' SSL 인증서 {days}일 뒤 만료 — 갱신이 필요합니다 ({site['url']})", 86400)
+
+
 async def check(site: dict):
     url, t0 = site["url"], time.monotonic()
     try:
@@ -35,6 +66,8 @@ async def check(site: dict):
     st = state.setdefault(url, {"fails": 0, "ok": None, "since": int(time.time())})
     ok = is_up(code)
     st.update(code=code, error=err, ms=round((time.monotonic() - t0) * 1000), ts=int(time.time()))
+    if time.time() - st.get("cert_ts", 0) > CERT_EVERY:
+        await check_cert(site, st)
     if ok:
         if st["ok"] is False:
             await asyncio.to_thread(raise_alert, "site_up", "", "", f"웹사이트 '{site['name']}' 복구됨 ({url}, {code})")

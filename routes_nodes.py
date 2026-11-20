@@ -111,6 +111,13 @@ def nodes_delete(request: Request, nid: int):
     return {"ok": True}
 
 
+@router.get("/api/nodes/{nid}/events")
+def nodes_events(request: Request, nid: int):
+    require_auth(request)
+    _node_or_404(nid)
+    return monitor.load_events_data(nid)
+
+
 @router.get("/api/nodes/{nid}/metrics")
 def nodes_metrics(request: Request, nid: int, hours: float = 24):
     require_auth(request)

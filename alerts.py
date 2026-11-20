@@ -34,9 +34,10 @@ _dm_channel = DC_CHANNEL
 COLORS = {"critical": 0xD03B3B, "warning": 0xFAB219, "good": 0x0CA30C, "info": 0x3987E5}
 
 
-def card(title: str, description: str = "", level: str = "info", fields: list | None = None, footer: str = "") -> dict:
+def card(title: str, description: str = "", level: str = "info", fields: list | None = None, footer: str = "",
+         url: str = "") -> dict:
     """A Discord embed: coloured bar by severity, short title, body, and small name/value columns."""
-    e = {"title": title[:250], "color": COLORS.get(level, COLORS["info"]),
+    e = {"title": title[:250], "color": COLORS.get(level, COLORS["info"]), **({"url": url} if url else {}),
          "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     if description:
         e["description"] = description[:3900]

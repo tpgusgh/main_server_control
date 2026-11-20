@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 import alerts
+from node_agent import hostsec
 
 CLAUDE_TOKEN = os.environ.pop("SM_CLAUDE_OAUTH_TOKEN", "").strip()   # from `claude setup-token` on the OTHER account
 CLAUDE_DIR = os.path.expanduser(os.environ.get("SM_CLAUDE_CONFIG_DIR", "~/.claude-monitor"))
@@ -110,6 +111,19 @@ def ip_key(ip: str) -> str:
     return str(a) if a.version == 4 else str(ipaddress.ip_network(f"{a}/64", strict=False))
 
 
+def proc_fact(p: dict, info: dict | None) -> dict:
+    """A top-process row for the AI: pid/owner plus where it came from (systemd unit, parent, command, secrets masked)."""
+    info = info or {}
+    d = {"pid": p.get("pid"), "name": p["name"], "cpu%": p["cpu"], "mem%": p["mem"], "user": p.get("user") or info.get("user")}
+    if info.get("unit"):
+        d["시작한곳(systemd)"] = info["unit"]
+    if info.get("parent"):
+        d["부모"] = f"{info['parent']}({info.get('ppid')})"
+    if info.get("cmd"):
+        d["명령"] = redact(info["cmd"])[:160]
+    return d
+
+
 def kst(ts) -> str:
     return datetime.fromtimestamp(ts, TZ).strftime("%m-%d %H:%M")
 
@@ -131,6 +145,27 @@ def redact(text: str) -> str:
     for rx in SECRET_PATTERNS:
         text = rx.sub(lambda m: (m.group(1) if m.groups() else "") + "[가림]", text)
     return text
+
+
+CHAT_ACTIONS = {"start_service": "start", "stop_service": "stop", "restart_service": "restart",
+                "enable_service": "enable", "disable_service": "disable", "terminate_process": "terminate"}
+CHAT_SCHEMA = {"type": "object", "properties": {
+    "answer": {"type": "string", "maxLength": 6000},
+    "actions": {"type": "array", "maxItems": 3, "items": {"type": "object", "properties": {
+        "type": {"type": "string", "enum": list(CHAT_ACTIONS)},
+        "target": {"type": "string", "maxLength": 120},
+        "label": {"type": "string", "maxLength": 60},
+        "reason": {"type": "string", "maxLength": 200}},
+        "required": ["type", "target", "label", "reason"]}}},
+    "required": ["answer", "actions"]}
+CHAT_RULES = """
+
+채팅 규칙(규칙 3 보완): 너는 직접 실행하지 않지만, 해결에 필요한 조치를 actions 로 '제안'할 수 있다. 관리자가 버튼을 눌러 확인해야 실행된다.
+- 가능한 조치: start/stop/restart/enable/disable_service(target=서비스 unit 이름), terminate_process(target=PID 숫자).
+- <data>에 실제로 있는 서비스·PID만 써라. 시스템 서비스는 '제어' 칸이 '보기전용(시스템)'이 아니거나 root 제어 가능할 때만.
+- 'stop'은 지금 끄기, 'disable'은 부팅 시 자동 시작 끄기다. "다시 안 켜지게" 하려면 disable 과 stop 을 둘 다 제안하라.
+- 확실하지 않거나 위험하면(대시보드·터널·SSH 관련) 제안하지 말고 이유를 설명하라. 필요 없으면 actions 는 빈 배열.
+- answer 에는 무엇을 왜 제안하는지 짧게 쓰고, 명령어 안내 대신 '아래 버튼을 누르면 실행됩니다'라고 안내하라."""
 
 
 LOG_SCHEMA = {"type": "object", "properties": {
@@ -250,6 +285,7 @@ class Analyst:
                  nodes_fn=lambda start=None, end=None: [], local_name_fn=lambda: "", fixers=None,
                  node_fn=lambda nid: (None, None), node_ids_fn=lambda: [], sites_fn=lambda: []):
         self.node_ids_fn, self.sites_fn = node_ids_fn, sites_fn
+        self.energy_fn = lambda: None  # set by fleet: estimated power use and electricity cost
         self.nodes_fn, self.local_name_fn, self.fixers, self.node_fn = nodes_fn, local_name_fn, fixers or {}, node_fn
         self._handled: dict[str, int] = {}
         self._backoff: dict[tuple, float] = {}  # failed job -> don't retry before this time
@@ -348,8 +384,10 @@ class Analyst:
                        (("cpu%", peak("cpu")), ("mem%", peak("mem")), ("temp_c", peak("temp"))) if p},
             "고부하구간": [{"시작": kst(e["start"]), "끝": kst(e["end"]), "원인": e["reasons"],
                        "cpu최대": round(e["cpu_max"]), "온도최대": round(e["temp_max"])} for e in ev["events"][:8]],
-            "상위프로세스": [{"name": p["name"], "cpu%": p["cpu"], "mem%": p["mem"]} for p in st["top"][:6]],
-            "서비스": [{"unit": s["unit"], "상태": s["active"], "부팅자동실행": s["enabled"]} for s in self.services_fn()],
+            "상위프로세스": [proc_fact(p, hostsec.proc_info(p["pid"]) if p.get("pid") else None) for p in st["top"][:6]],
+            "서비스": [{"unit": s["unit"], "상태": s["active"], "부팅자동실행": s["enabled"],
+                      **({} if s.get("controllable", True) else
+                         {"제어": "root제어가능(시스템, 버튼 제안 가능)" if s.get("root") else "보기전용(시스템)"})} for s in self.services_fn()],
             "인증_24시간": {"로그인성공": auth["ok"] or 0, "로그인실패": auth["fail"] or 0,
                         "차단IP의재접근": auth["banned_hits"] or 0, "Access/CSRF거부": auth["denied"] or 0,
                         "비인증요청": auth["anon"] or 0},
@@ -366,6 +404,7 @@ class Analyst:
             "활성세션수": sessions,
             "다른서버(Tailscale)": self.nodes_fn(),
             "웹사이트감시": self.sites_fn(),
+            "전력_추정(CPU기반)": self.energy_fn(),
             "보안설정": {"cloudflare_access": cfg["cf_access"], "2단계인증": cfg["totp"],
                      "신뢰IP수": cfg["trusted_count"], "차단기준": "비밀번호 3회 실패 시 영구차단(신뢰IP 제외)"},
         }
@@ -397,7 +436,7 @@ class Analyst:
                    "load1": (n.get("load") or [None])[0], "disk%": n.get("disk"), "swap%": n.get("swap")},
             "최근24시간_시간별[시각,cpu평균,cpu최대,mem평균,온도최대]":
                 [[kst(r["h"]), r["c"], r["cm"], r["m"], r["t"]] for r in hourly],
-            "상위프로세스": [{"name": p["name"], "cpu%": p["cpu"], "mem%": p["mem"]} for p in n.get("top", [])[:6]],
+            "상위프로세스": [proc_fact(p, p) for p in n.get("top", [])[:6]],  # agent ≥ 2.4 adds unit/parent/cmd
             "실패서비스": [{"unit": x["unit"], "제어가능": x.get("controllable", True)} for x in svcs if x.get("active") == "failed"],
             "사용자서비스": [{"unit": x["unit"], "상태": x.get("active")} for x in svcs if x.get("scope", "user") == "user"],
             # names only: the full system list was the slowest part of the prompt on this CPU
@@ -548,6 +587,37 @@ class Analyst:
             print("claude backend:", e, flush=True)
             return _Resp(error=str(e))
 
+    def validate_chat_actions(self, actions: list, node_id: int | None = None) -> list:
+        """Chat proposals become buttons only if they name a service/PID that really exists on that server and
+        that this dashboard may control. The endpoints behind the buttons check everything again on click."""
+        if node_id is None:
+            svcs, top = self.services_fn(), self.status_fn().get("top") or []
+        else:
+            d = self.node_fn(node_id)[1] or {}
+            svcs, top = d.get("services", []), (d.get("now") or {}).get("top", [])
+        units = {s["unit"]: s for s in svcs}
+        pids = {p.get("pid") for p in top if p.get("pid")}
+        out, seen = [], set()
+        for a in actions[:10]:
+            if len(out) == 3:
+                break
+            t, target = a.get("type"), str(a.get("target", "")).strip()
+            if t not in CHAT_ACTIONS or (t, target) in seen:
+                continue
+            if t == "terminate_process":
+                if not target.isdigit() or int(target) not in pids:
+                    continue
+            else:
+                sv = units.get(target)
+                if not sv or not (sv.get("controllable", True) or sv.get("root")):
+                    continue
+                if sv.get("protected") and CHAT_ACTIONS[t] in ("stop", "disable"):
+                    continue
+            seen.add((t, target))
+            out.append({"type": t, "action": CHAT_ACTIONS[t], "target": target, "node": node_id,
+                        "label": (a.get("label") or f"{target} {CHAT_ACTIONS[t]}")[:60], "reason": (a.get("reason") or "")[:200]})
+        return out
+
     def validate_actions(self, actions: list, node_id: int | None = None) -> list:
         if node_id is None:
             units = set(self.units_fn())
@@ -648,7 +718,7 @@ class Analyst:
                         extra.append(d)
                 memory = await asyncio.to_thread(self.memory_block)
                 past = await asyncio.to_thread(self.related_chats, question, session_id)
-                msgs = [{"role": "system", "content": f"{SYSTEM_RULES}{viewing}\n\n<data>\n{facts}\n</data>{memory}"}]
+                msgs = [{"role": "system", "content": f"{SYSTEM_RULES}{CHAT_RULES}{viewing}\n\n<data>\n{facts}\n</data>{memory}"}]
                 for h in history[-6:]:
                     if h.get("role") in ("user", "assistant"):
                         msgs.append({"role": h["role"], "content": str(h.get("content", ""))[:1500]})
@@ -661,9 +731,15 @@ class Analyst:
                 msgs.append({"role": "user", "content": q})
                 answer = ""
                 yield f"data: {json.dumps({'status': '생각 중…'}, ensure_ascii=False)}\n\n"
-                answer = (await self._claude({"messages": msgs}))["choices"][0]["message"]["content"]
+                out = json.loads((await self._claude({"messages": msgs, "response_format": {"type": "json_schema", "json_schema": {
+                    "name": "chat", "schema": CHAT_SCHEMA}}}))["choices"][0]["message"]["content"])
+                answer = out.get("answer", "")
+                actions = await asyncio.to_thread(self.validate_chat_actions, out.get("actions") or [], node_id)
                 yield f"data: {json.dumps({'t': answer}, ensure_ascii=False)}\n\n"
-                await asyncio.to_thread(self.save_chat, session_id, ip, question, answer)
+                if actions:
+                    yield f"data: {json.dumps({'actions': actions}, ensure_ascii=False)}\n\n"
+                saved = answer + ("\n\n[제안한 조치] " + ", ".join(a["label"] for a in actions) if actions else "")
+                await asyncio.to_thread(self.save_chat, session_id, ip, question, saved)
                 yield f"data: {json.dumps({'done': True, 'past': len(past)})}\n\n"
             except httpx.HTTPError as e:
                 yield f"data: {json.dumps({'error': f'AI 서버 오류: {type(e).__name__}'}, ensure_ascii=False)}\n\n"
@@ -755,7 +831,9 @@ class Analyst:
                               "신뢰IP": self.is_trusted(r["ip"])} for r in top_fail],
             "알림": alerts_by,
             "관리자작업": [{"시각": kst(r["ts"]), "작업": safe_path(r["detail"].replace(" ", "_"))} for r in actions],
-            "서비스": [{"unit": s["unit"], "상태": s["active"], "재시작횟수": s["restarts"]} for s in self.services_fn()],
+            "서비스": [{"unit": s["unit"], "상태": s["active"], "재시작횟수": s["restarts"],
+                      **({} if s.get("controllable", True) else
+                         {"제어": "root제어가능(시스템, 버튼 제안 가능)" if s.get("root") else "보기전용(시스템)"})} for s in self.services_fn()],
             "다른서버": self.nodes_fn(start, end),
         }
 
@@ -940,9 +1018,14 @@ class Analyst:
         """Rules decide what is red. Fixable items become candidates; the rest can only be reported."""
         now, cands, issues = int(time.time()), [], []
         for sv in self.services_fn():
-            if sv["active"] == "failed" and sv["unit"] not in IGNORE_FAILED:
+            if sv["active"] != "failed" or sv["unit"] in IGNORE_FAILED:
+                continue
+            if sv.get("controllable", True):
                 cands.append({"id": f"restart_local:{sv['unit']}", "type": "restart_local", "target": sv["unit"],
                               "server": self.local_name_fn(), "desc": f"이 서버의 {sv['unit']} 이(가) 실패 상태 → 재시작"})
+            else:  # system service: restarting needs root, so it can only be reported
+                issues.append({"id": f"sysfail:{sv['unit']}", "text": f"이 서버의 시스템 서비스 {sv['unit']} 실패 — "
+                               f"root 권한이 필요해 자동 재시작 불가 (sudo systemctl restart {sv['unit']})"})
         probs = self.fixers["node_problems"]() if "node_problems" in self.fixers else {"failed": [], "issues": []}
         for f in probs["failed"]:
             cands.append({"id": f"restart_node:{f['id']}:{f['unit']}", "type": "restart_node", "node": f["id"],

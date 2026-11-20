@@ -439,18 +439,95 @@ def upnp_mappings(timeout: float = 3.0):
 
 
 def tunnel_hosts() -> list[dict]:
-    """Hostnames this machine publishes through Cloudflare Tunnel (config files readable by this user)."""
+    """Hostnames this machine publishes through Cloudflare Tunnel: the configs of the cloudflared processes that
+    are actually running (backup/candidate .yml files are ignored); all configs only if none is running."""
     import glob
-    out = []
-    for path in glob.glob(str(Path.home() / ".cloudflared" / "*.yml")) + glob.glob("/etc/cloudflared/*.yml"):
+    running = []
+    for cmd in glob.glob("/proc/[0-9]*/cmdline"):
+        parts = _read(cmd).split("\0")
+        if parts and parts[0].endswith("cloudflared") and "--config" in parts:
+            i = parts.index("--config")
+            if i + 1 < len(parts):
+                running.append(parts[i + 1])
+    paths = running or glob.glob(str(Path.home() / ".cloudflared" / "*.yml")) + glob.glob("/etc/cloudflared/*.yml")
+    out, seen = [], set()
+    for path in dict.fromkeys(paths):
         host = None
         for line in _read(path).splitlines():
             m = re.match(r"\s*-?\s*hostname:\s*([A-Za-z0-9.-]+)", line)
             if m:
                 host = m.group(1).lower()
                 continue
-            m = re.match(r"\s*service:\s*(\S+)", line)
-            if m and host:
+            m = re.match(r"\s*-?\s*service:\s*(\S+)", line)
+            if m and host and not m.group(1).startswith("http_status:") and (host, m.group(1)) not in seen:
+                seen.add((host, m.group(1)))
                 out.append({"host": host, "service": m.group(1)[:80], "config": Path(path).name})
+            if m:
                 host = None
     return out
+
+
+# ---------------------------------------------------------------- processes (what started it, may we stop it)
+
+PROTECTED_PROCS = {"systemd", "(sd-pam)", "sshd", "sshd-session", "dbus-daemon", "dbus-broker", "tailscaled", "init"}
+
+
+def _comm(pid: int) -> str | None:
+    stat = _read(f"/proc/{pid}/stat")
+    return stat[stat.index("(") + 1:stat.rindex(")")] if "(" in stat else None
+
+
+def proc_info(pid: int) -> dict | None:
+    """Who/what a process is: owner, parent, command line and the systemd unit (cgroup) that started it."""
+    import os
+    import pwd
+    stat = _read(f"/proc/{pid}/stat")
+    if not stat or ")" not in stat:
+        return None
+    fields = stat[stat.rindex(")") + 2:].split()
+    try:
+        uid = os.stat(f"/proc/{pid}").st_uid
+        user = pwd.getpwuid(uid).pw_name
+    except (OSError, KeyError):
+        uid, user = None, None
+    unit = None
+    for line in _read(f"/proc/{pid}/cgroup").splitlines():
+        parts = [p for p in line.split(":", 2)[-1].split("/") if p.endswith((".service", ".scope"))]
+        if parts:
+            unit = parts[-1]
+    ppid = int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else None
+    return {"pid": pid, "name": stat[stat.index("(") + 1:stat.rindex(")")], "uid": uid, "user": user, "ppid": ppid,
+            "parent": _comm(ppid) if ppid else None, "unit": unit,
+            "cmd": _read(f"/proc/{pid}/cmdline").replace("\0", " ").strip()[:300] or None}
+
+
+def killable(pid: int, protected_units=(), protected_pids=()) -> tuple[bool, str]:
+    """May this dashboard/agent send SIGTERM? Only our own user's processes, never the session/system plumbing
+    or anything belonging to a protected unit (the dashboard, its tunnel, the agent itself)."""
+    import os
+    info = proc_info(pid)
+    if not info:
+        return False, "프로세스가 없습니다."
+    if pid <= 1 or pid in (os.getpid(), os.getppid()) or pid in set(protected_pids):
+        return False, "이 프로세스는 종료할 수 없습니다 (보호됨)."
+    if info["uid"] != os.getuid():
+        return False, "다른 사용자의 프로세스입니다."
+    if info["name"] in PROTECTED_PROCS or (info["unit"] or "") in set(protected_units):
+        return False, f"보호된 프로세스입니다 ({info['unit'] or info['name']})."
+    return True, info["name"]
+
+
+def caps() -> list:
+    """What the installed sm-block can do ([] when missing; 'svc' = system-service control)."""
+    try:
+        with open(f"{SM_DIR}/public.json") as f:
+            return json.load(f).get("caps") or []
+    except (OSError, ValueError):
+        return []
+
+
+def system_service(action: str, unit: str):
+    """Ask root sm-block to start/stop/restart/enable/disable an existing system service (it re-checks the deny list)."""
+    if "svc" not in caps():
+        return False, "시스템 서비스 제어 도구가 없습니다 — 그 서버에서 install-blocker.sh 를 다시 실행하세요"
+    return _request({"op": "svc", "action": action, "unit": unit}, wait=30.0)
