@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # hostsec.py ships next to this file
 import hostsec  # noqa: E402
 
-VERSION = "2.4"
+VERSION = "2.5"
 CONFIG_PATH = Path(os.environ.get("AGENT_CONFIG", Path(__file__).resolve().parent / "config.json"))
 UNIT_RE = re.compile(r"^[A-Za-z0-9@._-]+\.service$")
 SAMPLE_INTERVAL = 10
@@ -232,6 +232,7 @@ class Sampler(threading.Thread):
         self.updates = None
         self._host_t = 0.0
         self.integrity, self._int_t = None, 0.0
+        self.health, self._health_t = {}, 0.0
 
     def sample(self):
         now = time.time()
@@ -264,7 +265,7 @@ class Sampler(threading.Thread):
         self.latest = {"ts": int(now), "cpu": round(sum(per_core) / len(per_core), 1) if per_core else 0,
                        "per_core": per_core, **mem, "temp": main_temp(ts), "temps": ts,
                        "load": list(os.getloadavg()), "disk": root["percent"] if root else None, "disks": disks(),
-                       "net_rx": (rx - rx0) / dt, "net_tx": (tx - tx0) / dt, "top": top[:12]}
+                       "net_rx": (rx - rx0) / dt, "net_tx": (tx - tx0) / dt, "top": top[:12], "wifi": hostsec.wifi()}
         self.latest["ports"], self.latest["inbound"], self.latest["outbound"] = sockets()
         if now - self._host_t > 60:  # journal/loginctl are slower: once a minute is plenty
             self._host_t = now
@@ -272,11 +273,17 @@ class Sampler(threading.Thread):
                          "power": power_state(), "blocker": hostsec.blocked(),  # None = install-blocker.sh not run
                          "macs": hostsec.macs(), "upgrade": hostsec.upgrade_status(), "guard": hostsec.guard_status()}
 
+    def collect_health(self):
+        self.health = {**self.health, "wifi_drops": hostsec.wifi_events()}
+
     def run(self):
         while True:
             if time.time() - self._upd_t > 3600 or hostsec.upgraded_since(self._upd_t):  # hourly, or right after an upgrade
                 self._upd_t = time.time()
                 threading.Thread(target=lambda: setattr(self, "updates", hostsec.update_status()), daemon=True).start()
+            if time.time() - self._health_t > 3600:  # slow-changing health facts: hourly
+                self._health_t = time.time()
+                threading.Thread(target=self.collect_health, daemon=True).start()
             if time.time() - self._int_t > 3600:
                 self._int_t = time.time()
                 threading.Thread(target=lambda: setattr(self, "integrity", hostsec.integrity_snapshot()), daemon=True).start()
@@ -502,7 +509,7 @@ class Handler(BaseHTTPRequestHandler):
                                     "cpu_count": os.cpu_count(), "now": sampler.latest, "services": services(),
                                     "scope": SCOPE, "host_facts": sampler.host, "home_du": sampler.du,
                                     "updates": sampler.updates, "backups": list_backups(),
-                                    "integrity": sampler.integrity})
+                                    "integrity": sampler.integrity, "health": sampler.health})
         m = re.fullmatch(r"/v1/logs/([A-Za-z0-9@._-]+\.service)(?:\?lines=(\d+))?", self.path)
         if m:  # this user's units come from the user journal, everything else from the system journal
             unit = m.group(1)

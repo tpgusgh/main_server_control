@@ -13,6 +13,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 import monitor
+import netwatch
 from agent import TZ
 from core import ALERT_TITLES, confirm_password, db, local_name, raise_alert, require_auth
 from node_agent import hostsec
@@ -454,6 +455,8 @@ async def loop():
         try:
             await asyncio.to_thread(ledger.tick)
             await asyncio.to_thread(check_boots)
+            await asyncio.to_thread(quality_tick)
+            await asyncio.to_thread(check_surge)
             await asyncio.to_thread(energy_tick)
             await run_jobs()
             if time.time() - last_hour >= 3600:
@@ -461,6 +464,7 @@ async def loop():
                 await asyncio.to_thread(record_disk)
                 await asyncio.to_thread(integrity_all)
                 await asyncio.to_thread(remember_macs)
+                await asyncio.to_thread(lambda: _kv("wifi_drops_main", json.dumps(hostsec.wifi_events())))
                 await check_tunnels()
                 for f in await asyncio.to_thread(forecasts):
                     if f.get("days_left") is not None and f["days_left"] <= WARN_DAYS:
@@ -741,6 +745,67 @@ def power_schedule_delete(request: Request, body: JobDelBody):
     db("DELETE FROM power_jobs WHERE id=?", (body.id,))
     request.state.event, request.state.detail = "action", f"delete reboot schedule {body.id}"
     return {"ok": True}
+
+
+WATCH = netwatch.CentralWatch()
+
+
+def quality_tick():
+    """Every minute: can this server reach the internet, how fast, how strong is its Wi-Fi. On recovery from a real
+    outage (2+ failed checks) report it, because alerts cannot leave while the network is down."""
+    ok, ms = hostsec.internet_ok()
+    w = hostsec.wifi()
+    db("INSERT INTO net_quality(ts,server,rtt_ms,ok,dbm) VALUES(?,?,?,?,?)",
+       (int(time.time()), MAIN, ms, int(ok), (w or {}).get("dbm")))
+    mins = WATCH.observe(ok, time.time())
+    if mins:
+        drops = json.loads(_kv("wifi_drops_main") or "{}")
+        extra = f" 최근 24시간 와이파이 끊김 {drops.get('beacon_loss', 0)}회." if drops else ""
+        raise_alert("net_down", "", "", f"중앙서버 네트워크가 약 {mins}분 끊겼다가 복구됐어요 — 그동안의 '서버 응답 없음'은 "
+                                        f"중앙서버 쪽 문제였을 수 있어요.{extra}")
+
+
+def _tx_series(key: str, now: int):
+    if key == MAIN:
+        tbl, where, args = "metrics", "", ()
+    else:
+        tbl, where, args = "node_metrics", "node_id=? AND ", (int(key.split(":")[1]),)
+    recent = db(f"SELECT AVG(net_tx) v FROM {tbl} WHERE {where}ts>=? AND net_tx IS NOT NULL", (*args, now - 300), one=True)["v"]
+    rows = db(f"SELECT AVG(net_tx) v FROM {tbl} WHERE {where}ts>=? AND ts<? AND net_tx IS NOT NULL GROUP BY ts/300",
+              (*args, now - 86400, now - 900))
+    return recent, [r["v"] for r in rows if r["v"] is not None]
+
+
+def check_surge():
+    """Upload far above the server's own usual level for a while → alert (once an hour per server)."""
+    now = int(time.time())
+    for key, name in server_names().items():
+        recent, buckets = _tx_series(key, now)
+        hit, usual = netwatch.surge(recent, buckets)
+        if hit and now - int(_kv(f"surge:{key}") or 0) >= 3600:
+            _kv(f"surge:{key}", now)
+            raise_alert("upload_surge", "", "", f"서버 '{name}' 업로드가 평소보다 크게 늘었어요 — 최근 5분 평균 "
+                                                f"{recent / 1e6:.1f} MB/s (평소 {usual / 1e6:.2f} MB/s). 영상·데이터가 밖으로 나가는 중일 수 있어요.")
+
+
+@router.get("/api/netquality")
+def netquality(request: Request):
+    require_auth(request)
+    since, rows = int(time.time()) - 86400, []
+    for key, name in server_names().items():
+        r = db("SELECT COUNT(*) n, SUM(ok=0) bad, AVG(CASE WHEN ok=1 THEN rtt_ms END) avg, MAX(CASE WHEN ok=1 THEN rtt_ms END) mx "
+               "FROM net_quality WHERE server=? AND ts>=?", (key, since), one=True)
+        last = db("SELECT dbm FROM net_quality WHERE server=? AND dbm IS NOT NULL ORDER BY ts DESC LIMIT 1", (key,), one=True)
+        if key == MAIN:
+            drops = json.loads(_kv("wifi_drops_main") or "null")
+        else:
+            drops = (((hub.state.get(int(key.split(":")[1])) or {}).get("data") or {}).get("health") or {}).get("wifi_drops")
+        rows.append({"server": key, "name": name, "kind": "main" if key == MAIN else "node", "samples": r["n"],
+                     "loss_pct": round(100 * (r["bad"] or 0) / r["n"], 1) if r["n"] else None,
+                     "avg_ms": round(r["avg"]) if r["avg"] is not None else None,
+                     "max_ms": round(r["mx"]) if r["mx"] is not None else None,
+                     "dbm": last["dbm"] if last else None, "drops": drops})
+    return {"rows": rows}
 
 
 def _wire_ai():

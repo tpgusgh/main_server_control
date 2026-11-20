@@ -198,13 +198,15 @@ ALERT_TITLES = {"new_ip": "🔔 새 IP 로그인", "login_fail": "⚠️ 로그�
                 "config_change": "🧩 서버 설정 변경", "disk_forecast": "💽 디스크 가득 참 예상", "monthly": "📈 월간 가동률",
                 "upgrade": "📦 패키지 업그레이드", "ai_case": "🔎 AI 보안 조사 결과",
                 "exposure": "🌍 인터넷에 공개된 주소", "guard": "🧱 외부 차단 설정 변경",
-                "reboot": "🔄 서버 재부팅 완료", "cert_expiry": "🔐 SSL 인증서 만료 임박", "weekly": "🗓️ 주간 리포트"}
+                "reboot": "🔄 서버 재부팅 완료", "cert_expiry": "🔐 SSL 인증서 만료 임박", "weekly": "🗓️ 주간 리포트",
+                "net_down": "📡 중앙서버 네트워크 끊김", "upload_surge": "📤 업로드 급증"}
 ALERT_LEVEL = {"ban": "critical", "login_fail": "critical", "node_down": "critical", "needs_you": "critical",
                "new_ip": "warning", "node_hot": "warning", "power": "warning",
                "unban": "good", "node_up": "good", "ai_fix": "good", "site_down": "critical", "site_up": "good",
                "login_risk": "critical", "ai_risk": "warning",
                "config_change": "warning", "disk_forecast": "warning", "monthly": "info", "upgrade": "info", "ai_case": "critical",
-               "exposure": "critical", "guard": "warning", "reboot": "good", "cert_expiry": "warning", "weekly": "info"}
+               "exposure": "critical", "guard": "warning", "reboot": "good", "cert_expiry": "warning", "weekly": "info",
+               "net_down": "warning", "upload_surge": "warning"}
 
 def unblock_button(key: str) -> list:
     """Discord button under a block alert (discord_bot.py asks for confirmation before acting)."""

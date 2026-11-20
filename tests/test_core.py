@@ -532,3 +532,77 @@ class ChatActions(unittest.TestCase):
         ])
         self.assertEqual([(x["action"], x["target"]) for x in out],
                          [("stop", "worldrium.service"), ("disable", "worldrium.service"), ("terminate", "1736")])
+
+
+class NetworkFeatures(unittest.TestCase):
+    def test_wireless_line_is_parsed(self):
+        from node_agent import hostsec
+        text = ("Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE\n"
+                " face | tus | link level noise |  nwid  crypt   frag  retry   misc | beacon | 22\n"
+                "wlp2s0: 0000   63.  -47.  -256        0      0      0      2  20625        0\n")
+        self.assertEqual(hostsec.parse_wireless(text), {"iface": "wlp2s0", "dbm": -47})
+        self.assertIsNone(hostsec.parse_wireless(""), "no Wi-Fi interface")
+
+    def test_upload_surge_needs_history_a_big_jump_and_a_real_volume(self):
+        import netwatch
+        usual = [100_000.0] * 20
+        self.assertEqual(netwatch.surge(4_000_000, usual), (True, 100_000.0))
+        self.assertFalse(netwatch.surge(900_000, usual)[0], "5x the usual but under 1 MB/s is just noise")
+        self.assertFalse(netwatch.surge(2_000_000, [1_000_000.0] * 20)[0], "a busy server doubling is not a surge")
+        self.assertFalse(netwatch.surge(9_000_000, usual[:11])[0], "needs an hour of history first")
+        self.assertFalse(netwatch.surge(None, usual)[0])
+
+    def test_central_outage_is_reported_once_after_recovery(self):
+        import netwatch
+        w = netwatch.CentralWatch()
+        self.assertIsNone(w.observe(True, 0))
+        self.assertIsNone(w.observe(False, 60))
+        self.assertIsNone(w.observe(False, 120))
+        self.assertEqual(w.observe(True, 420), 6, "down since the first failed check, ~6 minutes")
+        self.assertIsNone(w.observe(True, 480), "reported once")
+        w.observe(False, 600)
+        self.assertIsNone(w.observe(True, 660), "a single blip is not an outage")
+
+    def test_node_is_not_called_down_while_our_own_internet_is_down(self):
+        import asyncio
+        from unittest import mock
+        con = sqlite3.connect(":memory:", check_same_thread=False)
+        con.row_factory = sqlite3.Row
+
+        def db(sql, params=(), one=False):
+            rows = con.execute(sql, params).fetchall()
+            return (rows[0] if rows else None) if one else rows
+        alerts = []
+        hub = nodes.NodeHub(db, lambda kind, *a, **k: alerts.append(kind))
+
+        async def unreachable(node):
+            raise ConnectionError("no route")
+        hub.fetch = unreachable
+        node = {"id": 1, "name": "sub", "address": "http://100.64.0.1:8101"}
+        hub.state[1] = {"online": True, "fails": 0}
+        with mock.patch.object(nodes, "central_online", lambda: False):
+            for _ in range(nodes.OFFLINE_AFTER):
+                asyncio.run(hub.poll(node))
+        self.assertEqual(alerts, [], "our own outage must not be reported as the server's")
+        self.assertTrue(hub.state[1]["unknown"])
+        self.assertTrue(hub.state[1]["online"], "kept as is, but marked unknown")
+        hub._central = (0.0, True)  # drop the cached "internet down" answer
+        with mock.patch.object(nodes, "central_online", lambda: True):
+            asyncio.run(hub.poll(node))
+        self.assertEqual(alerts, ["node_down"])
+        self.assertIs(hub.state[1]["online"], False)
+        self.assertFalse(hub.state[1]["unknown"])
+        self.assertEqual(db("SELECT COUNT(*) c FROM net_quality WHERE ok=0", one=True)["c"], nodes.OFFLINE_AFTER + 1)
+
+    def test_a_system_service_job_that_outlasts_the_wait_says_it_is_still_running(self):
+        from unittest import mock
+        from node_agent import hostsec
+        with mock.patch.object(hostsec, "caps", lambda: ["svc"]):
+            with mock.patch.object(hostsec, "_request", lambda *a, **k: (True, "요청함 (처리 대기 중)")):
+                ok, msg = hostsec.system_service("stop", "docker.service")
+            self.assertTrue(ok)
+            self.assertIn("80초", msg)
+            with mock.patch.object(hostsec, "_request", lambda *a, **k: (True, "docker.service stop 완료")):
+                self.assertEqual(hostsec.system_service("stop", "docker.service"), (True, "docker.service stop 완료"))
+            with mock.patch.object(hostsec, "_request", lambda *a, **k: (False, "거부")):
+                self.assertEqual(hostsec.system_service("stop", "docker.service"), (False, "거부"))
